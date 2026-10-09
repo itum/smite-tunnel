@@ -109,6 +109,63 @@ if [ ! -f "certs/ca.crt" ] || [ ! -s "certs/ca.crt" ]; then
 fi
 echo "✅ CA certificate saved to certs/ca.crt"
 
+echo ""
+echo "=== GRE tunnel (recommended) ==="
+echo "Creates GRE to the other server. Underlay NIC is auto-detected (eth0/ens3/enp…)."
+echo "Leave empty to skip and configure later from the panel (Nodes → Setup GRE)."
+read -p "GRE peer public IP (other server): " GRE_PEER_IP
+GRE_PEER_IP=${GRE_PEER_IP:-}
+GRE_NETWORK="${GRE_NETWORK:-172.17.1.0/30}"
+GRE_IFACE="${GRE_IFACE:-smite-gre}"
+GRE_MTU="${GRE_MTU:-1472}"
+GRE_LOCAL_INNER=""
+GRE_PEER_INNER=""
+
+if [ -n "$GRE_PEER_IP" ]; then
+    # Resolve /30 inners: foreign=.1 iran=.2
+    INNER_PAIR=$(python3 - <<PY
+import ipaddress
+h=[str(x) for x in ipaddress.ip_network("$GRE_NETWORK", strict=False).hosts()]
+print(h[0], h[1])
+PY
+)
+    FOREIGN_INNER=$(echo "$INNER_PAIR" | awk '{print $1}')
+    IRAN_INNER=$(echo "$INNER_PAIR" | awk '{print $2}')
+    if [ "$NODE_ROLE" = "foreign" ]; then
+        GRE_LOCAL_INNER="$FOREIGN_INNER"
+        GRE_PEER_INNER="$IRAN_INNER"
+    else
+        GRE_LOCAL_INNER="$IRAN_INNER"
+        GRE_PEER_INNER="$FOREIGN_INNER"
+    fi
+
+    mkdir -p "$INSTALL_DIR/config"
+    # Prefer bundled setup-gre.sh when available (host persistence + systemd)
+    SETUP_GRE=""
+    for cand in \
+        "$(dirname "$0")/setup-gre.sh" \
+        "/opt/smite/scripts/setup-gre.sh" \
+        "./scripts/setup-gre.sh"; do
+        if [ -f "$cand" ]; then
+            SETUP_GRE="$cand"
+            break
+        fi
+    done
+    if [ -n "$SETUP_GRE" ]; then
+        chmod +x "$SETUP_GRE" || true
+        SMITE_NODE_CONFIG="$INSTALL_DIR/config" \
+        NODE_ROLE="$NODE_ROLE" GRE_PEER_IP="$GRE_PEER_IP" GRE_NETWORK="$GRE_NETWORK" \
+          GRE_IFACE="$GRE_IFACE" GRE_MTU="$GRE_MTU" bash "$SETUP_GRE" || {
+            echo "⚠️  Host GRE setup failed; node will retry from env on start"
+        }
+    else
+        echo "⚠️  setup-gre.sh not found yet; will retry after cloning repo / on node start"
+    fi
+    echo "✅ GRE peer configured: $GRE_PEER_IP (local inner $GRE_LOCAL_INNER)"
+else
+    echo "⏭  Skipping GRE for now"
+fi
+
 # Create .env file
 cat > .env << EOF
 NODE_API_PORT=$NODE_API_PORT
@@ -119,6 +176,13 @@ SMITE_VERSION=${SMITE_VERSION:-latest}
 PANEL_CA_PATH=/etc/smite-node/certs/ca.crt
 PANEL_ADDRESS=$PANEL_ADDRESS
 PANEL_API_PORT=$PANEL_API_PORT
+
+GRE_PEER_IP=$GRE_PEER_IP
+GRE_LOCAL_INNER=$GRE_LOCAL_INNER
+GRE_PEER_INNER=$GRE_PEER_INNER
+GRE_NETWORK=$GRE_NETWORK
+GRE_IFACE=$GRE_IFACE
+GRE_MTU=$GRE_MTU
 EOF
 
 # Clone/update node files from GitHub
@@ -137,6 +201,17 @@ if [ ! -f "Dockerfile" ]; then
     
     # Copy node files
     cp -r "$TEMP_DIR/node"/* .
+    mkdir -p /opt/smite/scripts
+    cp -f "$TEMP_DIR/scripts/setup-gre.sh" /opt/smite/scripts/setup-gre.sh 2>/dev/null || true
+    chmod +x /opt/smite/scripts/setup-gre.sh 2>/dev/null || true
+    # If GRE peer was given before clone, run host setup now
+    if [ -n "${GRE_PEER_IP:-}" ] && [ -f /opt/smite/scripts/setup-gre.sh ]; then
+        mkdir -p "$INSTALL_DIR/config"
+        SMITE_NODE_CONFIG="$INSTALL_DIR/config" \
+        NODE_ROLE="$NODE_ROLE" GRE_PEER_IP="$GRE_PEER_IP" GRE_NETWORK="${GRE_NETWORK:-172.17.1.0/30}" \
+          GRE_IFACE="${GRE_IFACE:-smite-gre}" GRE_MTU="${GRE_MTU:-1472}" \
+          bash /opt/smite/scripts/setup-gre.sh || true
+    fi
     rm -rf "$TEMP_DIR"
 else
     # Update docker-compose.yml and Dockerfile if they exist
@@ -149,6 +224,9 @@ else
     if [ -d "$TEMP_DIR/node" ]; then
         cp -f "$TEMP_DIR/node/docker-compose.yml" docker-compose.yml 2>/dev/null || true
         cp -f "$TEMP_DIR/node/Dockerfile" Dockerfile 2>/dev/null || true
+        mkdir -p /opt/smite/scripts
+        cp -f "$TEMP_DIR/scripts/setup-gre.sh" /opt/smite/scripts/setup-gre.sh 2>/dev/null || true
+        chmod +x /opt/smite/scripts/setup-gre.sh 2>/dev/null || true
         rm -rf "$TEMP_DIR"
     fi
 fi

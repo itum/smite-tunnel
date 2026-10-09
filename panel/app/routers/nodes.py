@@ -239,6 +239,115 @@ async def list_nodes(db: AsyncSession = Depends(get_db)):
     return results
 
 
+class GreSetupRequest(BaseModel):
+    iran_node_id: str | None = None
+    foreign_node_id: str | None = None
+    network: str = "172.17.1.0/30"
+    mtu: int = 1472
+    iface: str = "smite-gre"
+
+
+@router.post("/gre/setup")
+async def setup_gre_between_nodes(body: GreSetupRequest | None = None, db: AsyncSession = Depends(get_db)):
+    """
+    Create GRE on both Iran and foreign nodes (auto underlay NIC/IP on each side).
+    Panel then receives gre_peers on the next node re-register and uses them for tunnels.
+    """
+    import ipaddress
+    from sqlalchemy.orm.attributes import flag_modified
+
+    body = body or GreSetupRequest()
+    result = await db.execute(select(Node))
+    all_nodes = result.scalars().all()
+    iran = None
+    foreign = None
+    if body.iran_node_id:
+        iran = next((n for n in all_nodes if n.id == body.iran_node_id), None)
+    if body.foreign_node_id:
+        foreign = next((n for n in all_nodes if n.id == body.foreign_node_id), None)
+    if not iran:
+        iran = next(
+            (n for n in all_nodes if (n.node_metadata or {}).get("role") == "iran"),
+            None,
+        )
+    if not foreign:
+        foreign = next(
+            (n for n in all_nodes if (n.node_metadata or {}).get("role") == "foreign"),
+            None,
+        )
+    if not iran or not foreign:
+        raise HTTPException(
+            status_code=400,
+            detail="Need one Iran node and one foreign node registered before GRE setup",
+        )
+
+    iran_ip = (iran.node_metadata or {}).get("ip_address")
+    foreign_ip = (foreign.node_metadata or {}).get("ip_address")
+    if not iran_ip or not foreign_ip:
+        raise HTTPException(status_code=400, detail="Both nodes must have public ip_address in metadata")
+
+    net = ipaddress.ip_network(body.network, strict=False)
+    hosts = [str(h) for h in net.hosts()]
+    if len(hosts) < 2:
+        raise HTTPException(status_code=400, detail=f"Invalid GRE network {body.network}")
+    foreign_inner, iran_inner = hosts[0], hosts[1]
+
+    client = NodeClient()
+    iran_payload = {
+        "remote_public_ip": foreign_ip,
+        "role": "iran",
+        "local_public_ip": iran_ip,
+        "local_inner": iran_inner,
+        "peer_inner": foreign_inner,
+        "network": str(net),
+        "iface": body.iface,
+        "mtu": body.mtu,
+    }
+    foreign_payload = {
+        "remote_public_ip": iran_ip,
+        "role": "foreign",
+        "local_public_ip": foreign_ip,
+        "local_inner": foreign_inner,
+        "peer_inner": iran_inner,
+        "network": str(net),
+        "iface": body.iface,
+        "mtu": body.mtu,
+    }
+
+    iran_resp = await client.send_to_node(iran.id, "/api/agent/network/gre", iran_payload)
+    foreign_resp = await client.send_to_node(foreign.id, "/api/agent/network/gre", foreign_payload)
+
+    # Persist gre_peers hints immediately (nodes will refresh on re-register too).
+    for node, peer_public, local_inner, peer_inner, resp in (
+        (iran, foreign_ip, iran_inner, foreign_inner, iran_resp),
+        (foreign, iran_ip, foreign_inner, iran_inner, foreign_resp),
+    ):
+        md = dict(node.node_metadata or {})
+        gre = (resp or {}).get("gre") or {}
+        md["gre_peers"] = [
+            {
+                "iface": gre.get("iface") or body.iface,
+                "local": gre.get("local_public") or md.get("ip_address"),
+                "remote": peer_public,
+                "local_inner": gre.get("local_inner") or local_inner,
+                "peer_inner": gre.get("peer_inner") or peer_inner,
+                "mtu": gre.get("mtu") or body.mtu,
+            }
+        ]
+        node.node_metadata = md
+        flag_modified(node, "node_metadata")
+    await db.commit()
+
+    ok = (iran_resp or {}).get("status") == "ok" and (foreign_resp or {}).get("status") == "ok"
+    return {
+        "status": "ok" if ok else "partial",
+        "network": str(net),
+        "iran": {"node_id": iran.id, "inner": iran_inner, "response": iran_resp},
+        "foreign": {"node_id": foreign.id, "inner": foreign_inner, "response": foreign_resp},
+        "message": "GRE configured; tunnels will prefer GRE automatically",
+    }
+
+
 @router.get("/{node_id}", response_model=NodeResponse)
 async def get_node(node_id: str, db: AsyncSession = Depends(get_db)):
     """Get node by ID"""

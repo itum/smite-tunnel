@@ -88,6 +88,28 @@ def prepare_frp_spec_for_node(spec: dict, node: Node, request: Request) -> dict:
     return spec_for_node
 
 
+def iran_host_for_foreign_client(iran_node: Node, foreign_node: Node | None = None) -> str:
+    """Prefer GRE inner IP when foreign reverse clients dial Iran."""
+    from app.utils import resolve_iran_control_target
+
+    iran_md = iran_node.node_metadata or {}
+    foreign_md = (foreign_node.node_metadata or {}) if foreign_node else {}
+    target = resolve_iran_control_target(
+        iran_public_ip=iran_md.get("ip_address"),
+        foreign_public_ip=foreign_md.get("ip_address"),
+        iran_gre_peers=iran_md.get("gre_peers") or [],
+        foreign_gre_peers=foreign_md.get("gre_peers") or [],
+    )
+    if target.get("via") == "gre":
+        logger.info(
+            "Reverse tunnel control via GRE: foreign→%s (mtu=%s, iface=%s)",
+            target.get("host"),
+            target.get("mtu"),
+            target.get("iface"),
+        )
+    return target["host"]
+
+
 class TunnelCreate(BaseModel):
     name: str
     core: str
@@ -321,13 +343,13 @@ async def create_tunnel(tunnel: TunnelCreate, request: Request, db: AsyncSession
                 elif "tls" in server_spec:
                     server_spec["websocket_tls"] = server_spec["tls"]
                 
-                iran_node_ip = iran_node.node_metadata.get("ip_address")
-                if not iran_node_ip:
+                if not iran_node.node_metadata.get("ip_address"):
                     db_tunnel.status = "error"
                     db_tunnel.error_message = "Iran node has no IP address"
                     await db.commit()
                     await db.refresh(db_tunnel)
                     return db_tunnel
+                iran_node_ip = iran_host_for_foreign_client(iran_node, foreign_node)
                 transport_lower = transport.lower()
                 if transport_lower in ("websocket", "ws"):
                     use_tls = bool(server_spec.get("websocket_tls") or server_spec.get("tls"))
@@ -358,13 +380,13 @@ async def create_tunnel(tunnel: TunnelCreate, request: Request, db: AsyncSession
                     await db.refresh(db_tunnel)
                     return db_tunnel
                 
-                iran_node_ip = iran_node.node_metadata.get("ip_address")
-                if not iran_node_ip:
+                if not iran_node.node_metadata.get("ip_address"):
                     db_tunnel.status = "error"
                     db_tunnel.error_message = "Iran node has no IP address"
                     await db.commit()
                     await db.refresh(db_tunnel)
                     return db_tunnel
+                iran_node_ip = iran_host_for_foreign_client(iran_node, foreign_node)
                 import hashlib
                 port_hash = int(hashlib.md5(db_tunnel.id.encode()).hexdigest()[:8], 16)
                 first_port = int(ports[0]) if isinstance(ports[0], (int, str)) and str(ports[0]).isdigit() else ports[0]
@@ -405,13 +427,13 @@ async def create_tunnel(tunnel: TunnelCreate, request: Request, db: AsyncSession
                     await db.refresh(db_tunnel)
                     return db_tunnel
 
-                iran_node_ip = iran_node.node_metadata.get("ip_address")
-                if not iran_node_ip:
+                if not iran_node.node_metadata.get("ip_address"):
                     db_tunnel.status = "error"
                     db_tunnel.error_message = "Iran node has no IP address"
                     await db.commit()
                     await db.refresh(db_tunnel)
                     return db_tunnel
+                iran_node_ip = iran_host_for_foreign_client(iran_node, foreign_node)
 
                 import hashlib
                 port_hash = int(hashlib.md5(db_tunnel.id.encode()).hexdigest()[:8], 16)
@@ -463,13 +485,13 @@ async def create_tunnel(tunnel: TunnelCreate, request: Request, db: AsyncSession
                     await db.refresh(db_tunnel)
                     return db_tunnel
 
-                iran_node_ip = iran_node.node_metadata.get("ip_address")
-                if not iran_node_ip:
+                if not iran_node.node_metadata.get("ip_address"):
                     db_tunnel.status = "error"
                     db_tunnel.error_message = "Iran node has no IP address"
                     await db.commit()
                     await db.refresh(db_tunnel)
                     return db_tunnel
+                iran_node_ip = iran_host_for_foreign_client(iran_node, foreign_node)
 
                 from app.utils import BORE_CONTROL_PORT, generate_bore_secret
                 from sqlalchemy.orm.attributes import flag_modified
@@ -522,13 +544,13 @@ async def create_tunnel(tunnel: TunnelCreate, request: Request, db: AsyncSession
                 server_spec["bind_port"] = bind_port
                 server_spec["token"] = token
                 
-                iran_node_ip = iran_node.node_metadata.get("ip_address")
-                if not iran_node_ip:
+                if not iran_node.node_metadata.get("ip_address"):
                     db_tunnel.status = "error"
                     db_tunnel.error_message = "Iran node has no IP address"
                     await db.commit()
                     await db.refresh(db_tunnel)
                     return db_tunnel
+                iran_node_ip = iran_host_for_foreign_client(iran_node, foreign_node)
                 client_spec["server_addr"] = iran_node_ip
                 client_spec["server_port"] = bind_port
                 client_spec["token"] = token
@@ -631,13 +653,13 @@ async def create_tunnel(tunnel: TunnelCreate, request: Request, db: AsyncSession
                 await db.refresh(db_tunnel)
                 logger.info(f"Backhaul tunnel {db_tunnel.id}: saved ports to database: {db_tunnel.spec.get('ports')} (count: {len(db_tunnel.spec.get('ports', []))})")
                 
-                iran_node_ip = iran_node.node_metadata.get("ip_address")
-                if not iran_node_ip:
+                if not iran_node.node_metadata.get("ip_address"):
                     db_tunnel.status = "error"
                     db_tunnel.error_message = "Iran node has no IP address"
                     await db.commit()
                     await db.refresh(db_tunnel)
                     return db_tunnel
+                iran_node_ip = iran_host_for_foreign_client(iran_node, foreign_node)
                 transport_lower = transport.lower()
                 if transport_lower in ("ws", "wsmux"):
                     use_tls = bool(server_spec.get("tls_cert") or server_spec.get("server_options", {}).get("tls_cert"))
@@ -1321,7 +1343,19 @@ async def update_tunnel(
                 if not forward_to:
                     from app.utils import format_address_port
                     remote_ip = tunnel.spec.get("remote_ip", "127.0.0.1")
-                    remote_port = tunnel.spec.get("remote_port", 8080)
+                    ports = tunnel.spec.get("ports") or []
+                    first_port = None
+                    if ports:
+                        try:
+                            first_port = int(ports[0])
+                        except Exception:
+                            first_port = None
+                    remote_port = (
+                        tunnel.spec.get("remote_port")
+                        or tunnel.spec.get("listen_port")
+                        or first_port
+                        or 8080
+                    )
                     forward_to = format_address_port(remote_ip, remote_port)
                 
                 panel_port = listen_port or tunnel.spec.get("remote_port")
@@ -1611,12 +1645,12 @@ async def apply_tunnel(tunnel_id: str, request: Request, db: AsyncSession = Depe
                     logger.info(f"Backhaul tunnel update {tunnel.id}: saved ports to database: {tunnel.spec.get('ports')} (count: {len(tunnel.spec.get('ports', []))})")
                     
                     client_spec = spec.copy()
-                    iran_node_ip = iran_node.node_metadata.get("ip_address")
-                    if not iran_node_ip:
+                    if not iran_node.node_metadata.get("ip_address"):
                         tunnel.status = "error"
                         tunnel.error_message = "Iran node has no IP address"
                         await db.commit()
                         raise HTTPException(status_code=400, detail="Iran node has no IP address")
+                    iran_node_ip = iran_host_for_foreign_client(iran_node, foreign_node)
                     
                     transport_lower = transport.lower()
                     if transport_lower in ("ws", "wsmux"):
@@ -1649,12 +1683,12 @@ async def apply_tunnel(tunnel_id: str, request: Request, db: AsyncSession = Depe
                         await db.commit()
                         await db.refresh(tunnel)
                     
-                    iran_node_ip = iran_node.node_metadata.get("ip_address")
-                    if not iran_node_ip:
+                    if not iran_node.node_metadata.get("ip_address"):
                         tunnel.status = "error"
                         tunnel.error_message = "Iran node has no IP address"
                         await db.commit()
                         raise HTTPException(status_code=400, detail="Iran node has no IP address")
+                    iran_node_ip = iran_host_for_foreign_client(iran_node, foreign_node)
                     
                     server_spec = spec.copy()
                     server_spec["mode"] = "server"
@@ -1710,12 +1744,12 @@ async def apply_tunnel(tunnel_id: str, request: Request, db: AsyncSession = Depe
                     server_spec["transport"] = transport
                     server_spec["token"] = token
                     
-                    iran_node_ip = iran_node.node_metadata.get("ip_address")
-                    if not iran_node_ip:
+                    if not iran_node.node_metadata.get("ip_address"):
                         tunnel.status = "error"
                         tunnel.error_message = "Iran node has no IP address"
                         await db.commit()
                         raise HTTPException(status_code=400, detail="Iran node has no IP address")
+                    iran_node_ip = iran_host_for_foreign_client(iran_node, foreign_node)
                     
                     client_spec = spec.copy()
                     client_spec["mode"] = "client"
@@ -1754,12 +1788,12 @@ async def apply_tunnel(tunnel_id: str, request: Request, db: AsyncSession = Depe
                     server_spec["reverse_port"] = listen_port
                     server_spec["auth"] = auth
                     
-                    iran_node_ip = iran_node.node_metadata.get("ip_address")
-                    if not iran_node_ip:
+                    if not iran_node.node_metadata.get("ip_address"):
                         tunnel.status = "error"
                         tunnel.error_message = "Iran node has no IP address"
                         await db.commit()
                         raise HTTPException(status_code=400, detail="Iran node has no IP address")
+                    iran_node_ip = iran_host_for_foreign_client(iran_node, foreign_node)
                     
                     client_spec = spec.copy()
                     client_spec["mode"] = "client"
@@ -1807,12 +1841,12 @@ async def apply_tunnel(tunnel_id: str, request: Request, db: AsyncSession = Depe
                     server_spec["secret"] = secret
                     server_spec["type"] = tunnel_type
 
-                    iran_node_ip = iran_node.node_metadata.get("ip_address")
-                    if not iran_node_ip:
+                    if not iran_node.node_metadata.get("ip_address"):
                         tunnel.status = "error"
                         tunnel.error_message = "Iran node has no IP address"
                         await db.commit()
                         raise HTTPException(status_code=400, detail="Iran node has no IP address")
+                    iran_node_ip = iran_host_for_foreign_client(iran_node, foreign_node)
 
                     client_spec = spec.copy()
                     client_spec["mode"] = "client"
@@ -1835,12 +1869,12 @@ async def apply_tunnel(tunnel_id: str, request: Request, db: AsyncSession = Depe
                         await db.commit()
                         raise HTTPException(status_code=400, detail="Missing required field: ports or listen_port/remote_port")
 
-                    iran_node_ip = iran_node.node_metadata.get("ip_address")
-                    if not iran_node_ip:
+                    if not iran_node.node_metadata.get("ip_address"):
                         tunnel.status = "error"
                         tunnel.error_message = "Iran node has no IP address"
                         await db.commit()
                         raise HTTPException(status_code=400, detail="Iran node has no IP address")
+                    iran_node_ip = iran_host_for_foreign_client(iran_node, foreign_node)
 
                     from app.utils import BORE_CONTROL_PORT, generate_bore_secret
                     from sqlalchemy.orm.attributes import flag_modified

@@ -22,7 +22,7 @@ Smite Tunnel is a panel plus node agent for reverse and forward tunnels. The **p
 | **Iran node** | Public listen side. Runs reverse-tunnel *servers* and GOST forwarders. |
 | **Foreign node** | Private / origin side. Runs reverse-tunnel *clients* and hosts your real service (Xray, SSH, …). |
 
-The panel talks to both nodes over HTTP. When a GRE tunnel exists between Iran and foreign, **GOST automatically prefers the GRE inner IP** and **clamps TCP MSS (default 1360)** so large HTTPS (for example X/Twitter) does not stall.
+The panel talks to both nodes over HTTP. When a GRE tunnel exists between Iran and foreign, the panel **automatically prefers GRE inner IPs** for **GOST forward** and for **reverse control paths** (FRP, bore, chisel, wstunnel, rathole, backhaul). Nodes also **clamp TCP MSS (default 1360)** so large HTTPS (for example X/Twitter) does not stall.
 
 ---
 
@@ -109,16 +109,36 @@ Chisel: TCP. Rathole: TCP / WS. Backhaul: TCP, UDP, WS, WSMux, TCPMux. wstunnel:
 
 ---
 
+## GRE tunnel (automatic)
+
+During **node install** (`scripts/smite-node.sh`) you are asked for the **GRE peer public IP** (the other server). The installer:
+
+- Auto-detects the underlay NIC/IP (`ip route get` — works with `eth0`, `ens3`, `enp*`, …)
+- Creates interface `smite-gre` with inners `172.17.1.1/30` (foreign) and `172.17.1.2/30` (Iran)
+- Persists via `smite-gre.service` + `/opt/smite-node/config/gre.json`
+- Passes `GRE_PEER_IP` into the node container so GRE is re-applied on start
+
+You can also run later:
+
+```bash
+# on each server
+sudo bash scripts/setup-gre.sh --role iran --peer FOREIGN_PUBLIC_IP
+sudo bash scripts/setup-gre.sh --role foreign --peer IRAN_PUBLIC_IP
+```
+
+Or from the panel UI: **Nodes → Setup GRE** (`POST /api/nodes/gre/setup`), which configures both registered nodes.
+
 ## Network optimizations (automatic)
 
-On tunnel apply, Iran nodes:
+On tunnel apply / GRE setup, nodes:
 
-- Discover GRE/IP tunnels (`ip tunnel` / `ip link`)
+- Discover GRE/IP tunnels (`ip tunnel` / `ip link`) — any iface name
 - Register `gre_peers` (iface, public remote, inner IPs, MTU) with the panel
 - Prefer GRE inner IP for GOST when the foreign public IP matches a GRE peer
+- Prefer GRE inner IP of Iran when reverse clients (FRP/bore/chisel/…) dial the Iran control plane
 - Enable TCP MTU probing and **TCPMSS 1360** on tunnel ports (GRE MTU 1472 → max MSS 1432; 1360 leaves room for PPPoE/mobile)
 
-No extra panel clicks are required.
+No hardcoded `eth0`. Once GRE exists, tunnels pick it up automatically.
 
 ---
 

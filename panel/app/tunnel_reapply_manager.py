@@ -145,11 +145,14 @@ class TunnelReapplyManager:
                             bind_port = spec.get("bind_port", 7000)
                             token = spec.get("token")
                             
-                            iran_node_ip = iran_node.node_metadata.get("ip_address")
-                            if not iran_node_ip:
+                            if not iran_node.node_metadata.get("ip_address"):
                                 logger.warning(f"Tunnel {tunnel.id}: Iran node has no IP address, skipping")
                                 failed += 1
                                 continue
+                            from app.utils import iran_control_host_for_nodes
+                            iran_node_ip = iran_control_host_for_nodes(
+                                iran_node.node_metadata, foreign_node.node_metadata
+                            )
                             
                             spec_for_iran = spec.copy()
                             spec_for_iran["mode"] = "server"
@@ -244,9 +247,12 @@ class TunnelReapplyManager:
                                 server_spec["transport"] = transport
                                 server_spec["token"] = token
                                 
-                                iran_node_ip = iran_node.node_metadata.get("ip_address")
-                                if not iran_node_ip:
+                                if not iran_node.node_metadata.get("ip_address"):
                                     continue
+                                from app.utils import iran_control_host_for_nodes
+                                iran_node_ip = iran_control_host_for_nodes(
+                                    iran_node.node_metadata, foreign_node.node_metadata
+                                )
                                 transport_lower = transport.lower()
                                 if transport_lower in ("websocket", "ws"):
                                     use_tls = bool(server_spec.get("websocket_tls") or server_spec.get("tls"))
@@ -275,9 +281,12 @@ class TunnelReapplyManager:
                                 if token:
                                     server_spec["token"] = token
                                 
-                                iran_node_ip = iran_node.node_metadata.get("ip_address")
-                                if not iran_node_ip:
+                                if not iran_node.node_metadata.get("ip_address"):
                                     continue
+                                from app.utils import iran_control_host_for_nodes
+                                iran_node_ip = iran_control_host_for_nodes(
+                                    iran_node.node_metadata, foreign_node.node_metadata
+                                )
                                 transport_lower = transport.lower()
                                 if transport_lower in ("ws", "wsmux"):
                                     use_tls = bool(server_spec.get("tls_cert") or server_spec.get("server_options", {}).get("tls_cert"))
@@ -301,10 +310,12 @@ class TunnelReapplyManager:
                                 server_spec["server_port"] = server_control_port
                                 server_spec["reverse_port"] = listen_port
                                 
-                                iran_node_ip = iran_node.node_metadata.get("ip_address")
-                                if not iran_node_ip:
+                                if not iran_node.node_metadata.get("ip_address"):
                                     continue
-                                from app.utils import is_valid_ipv6_address
+                                from app.utils import is_valid_ipv6_address, iran_control_host_for_nodes
+                                iran_node_ip = iran_control_host_for_nodes(
+                                    iran_node.node_metadata, foreign_node.node_metadata
+                                )
                                 if is_valid_ipv6_address(iran_node_ip):
                                     client_spec["server_url"] = f"http://[{iran_node_ip}]:{server_control_port}"
                                 else:
@@ -321,11 +332,17 @@ class TunnelReapplyManager:
                                     ports = [listen_port]
                                 if not ports:
                                     continue
-                                iran_node_ip = iran_node.node_metadata.get("ip_address")
-                                if not iran_node_ip:
+                                if not iran_node.node_metadata.get("ip_address"):
                                     continue
                                 import hashlib
-                                from app.utils import generate_wstunnel_secret, build_wstunnel_server_url
+                                from app.utils import (
+                                    generate_wstunnel_secret,
+                                    build_wstunnel_server_url,
+                                    iran_control_host_for_nodes,
+                                )
+                                iran_node_ip = iran_control_host_for_nodes(
+                                    iran_node.node_metadata, foreign_node.node_metadata
+                                )
                                 port_hash = int(hashlib.md5(tunnel.id.encode()).hexdigest()[:8], 16)
                                 first_port = int(ports[0]) if str(ports[0]).isdigit() else ports[0]
                                 server_control_port = server_spec.get("control_port") or (int(first_port) + 10000 + (port_hash % 1000))
@@ -351,7 +368,7 @@ class TunnelReapplyManager:
                                 client_spec["local_addr"] = server_spec.get("local_addr") or f"127.0.0.1:{first_port}"
 
                             elif tunnel.core == "bore":
-                                from app.utils import BORE_CONTROL_PORT, generate_bore_secret
+                                from app.utils import BORE_CONTROL_PORT, generate_bore_secret, iran_control_host_for_nodes
                                 ports = server_spec.get("ports") or []
                                 if isinstance(ports, str):
                                     ports = [p.strip() for p in ports.split(",") if p.strip()]
@@ -360,9 +377,11 @@ class TunnelReapplyManager:
                                     ports = [listen_port]
                                 if not ports:
                                     continue
-                                iran_node_ip = iran_node.node_metadata.get("ip_address")
-                                if not iran_node_ip:
+                                if not iran_node.node_metadata.get("ip_address"):
                                     continue
+                                iran_node_ip = iran_control_host_for_nodes(
+                                    iran_node.node_metadata, foreign_node.node_metadata
+                                )
                                 secret = (server_spec.get("secret") or "").strip() or generate_bore_secret()
                                 server_spec["mode"] = "server"
                                 server_spec["secret"] = secret

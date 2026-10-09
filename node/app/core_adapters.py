@@ -1356,11 +1356,47 @@ class WstunnelAdapter:
             listen_host = "[::]" if use_ipv6 else "0.0.0.0"
             listen_url = f"ws://{listen_host}:{int(server_port)}"
 
+            # wstunnel v11+: any restriction mode denies reverse unless
+            # !ReverseTunnel is explicitly allowed. PathPrefix matching is
+            # unreliable for reverse upgrades, so allow reverse for listed ports.
+            reverse_ports = []
+            for p in (spec.get("ports") or []):
+                try:
+                    reverse_ports.append(int(p))
+                except Exception:
+                    pass
+            for key in ("reverse_port", "listen_port", "remote_port"):
+                if spec.get(key):
+                    try:
+                        reverse_ports.append(int(spec[key]))
+                    except Exception:
+                        pass
+            reverse_ports = sorted(set(reverse_ports)) or list(range(1, 65536))
+            port_lines = "\n".join(f"          - {p}" for p in reverse_ports)
+            restrict_path = self.config_dir / f"{tunnel_id}_restrict.yaml"
+            restrict_path.write_text(
+                "restrictions:\n"
+                f'  - name: "smite-{tunnel_id[:8]}"\n'
+                "    match:\n"
+                "      - !Any\n"
+                "    allow:\n"
+                "      - !ReverseTunnel\n"
+                "        protocol:\n"
+                "          - Tcp\n"
+                "          - Udp\n"
+                "        port:\n"
+                f"{port_lines}\n"
+                "        cidr:\n"
+                "          - 0.0.0.0/0\n"
+                "          - ::/0\n",
+                encoding="utf-8",
+            )
+
             cmd = [
                 str(binary_path),
                 "server",
-                "--restrict-http-upgrade-path-prefix",
-                secret,
+                "--restrict-config",
+                str(restrict_path),
                 listen_url,
             ]
 

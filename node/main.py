@@ -58,6 +58,21 @@ async def lifespan(app: FastAPI):
     
     adapter_manager = AdapterManager()
     app.state.adapter_manager = adapter_manager
+
+    # Auto GRE from GRE_PEER_IP / saved gre.json (install script or panel).
+    try:
+        from app.gre_setup import ensure_gre_from_env
+        gre = ensure_gre_from_env()
+        if gre:
+            logger.info(f"GRE ensured on startup: {gre.get('gre') or gre}")
+            # Re-register so panel gets fresh gre_peers immediately.
+            if getattr(app.state, "h2_client", None):
+                try:
+                    await app.state.h2_client.register_with_panel()
+                except Exception as e:
+                    logger.debug(f"Re-register after GRE: {e}")
+    except Exception as e:
+        logger.warning(f"GRE auto-setup skipped: {e}")
     
     try:
         await adapter_manager.restore_tunnels()

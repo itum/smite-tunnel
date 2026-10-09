@@ -260,3 +260,66 @@ def resolve_gost_forward_target(
         "public_ip": foreign_public,
     }
 
+
+def resolve_iran_control_target(
+    iran_public_ip: Optional[str],
+    foreign_public_ip: Optional[str] = None,
+    iran_gre_peers: Optional[list] = None,
+    foreign_gre_peers: Optional[list] = None,
+) -> dict:
+    """
+    Address foreign reverse-tunnel clients should use to reach Iran.
+
+    Prefer GRE inner IP of the Iran side when a GRE tunnel exists between the
+    nodes (foreign peer_inner → Iran, or Iran local_inner). Falls back to Iran public IP.
+    """
+    iran_public = (iran_public_ip or "").strip() or None
+    foreign_public = (foreign_public_ip or "").strip() or None
+
+    for gre in foreign_gre_peers or []:
+        if iran_public and gre.get("remote") == iran_public and gre.get("peer_inner"):
+            mtu = gre.get("mtu") or 1472
+            return {
+                "host": gre["peer_inner"],
+                "via": "gre",
+                "iface": gre.get("iface"),
+                "mtu": mtu,
+                "mss": mss_for_mtu(mtu),
+                "public_ip": iran_public,
+            }
+
+    for gre in iran_gre_peers or []:
+        if foreign_public and gre.get("remote") == foreign_public and gre.get("local_inner"):
+            mtu = gre.get("mtu") or 1472
+            return {
+                "host": gre["local_inner"],
+                "via": "gre",
+                "iface": gre.get("iface"),
+                "mtu": mtu,
+                "mss": mss_for_mtu(mtu),
+                "public_ip": iran_public,
+            }
+
+    return {
+        "host": iran_public or "127.0.0.1",
+        "via": "public",
+        "mtu": 1500,
+        "mss": DEFAULT_TUNNEL_TCP_MSS,
+        "public_ip": iran_public,
+    }
+
+
+def iran_control_host_for_nodes(
+    iran_metadata: Optional[dict] = None,
+    foreign_metadata: Optional[dict] = None,
+) -> str:
+    """Host foreign reverse clients should dial for Iran control plane."""
+    iran_md = iran_metadata or {}
+    foreign_md = foreign_metadata or {}
+    return resolve_iran_control_target(
+        iran_public_ip=iran_md.get("ip_address"),
+        foreign_public_ip=foreign_md.get("ip_address"),
+        iran_gre_peers=iran_md.get("gre_peers") or [],
+        foreign_gre_peers=foreign_md.get("gre_peers") or [],
+    )["host"]
+

@@ -22,6 +22,7 @@ const Nodes = () => {
   const [certContent, setCertContent] = useState<string>('')
   const [certLoading, setCertLoading] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [greLoading, setGreLoading] = useState(false)
 
   useEffect(() => {
     fetchNodes()
@@ -110,6 +111,27 @@ const Nodes = () => {
     }
   }
 
+  const setupGre = async () => {
+    if (!confirm('Create GRE between Iran and foreign nodes? Underlay NIC is auto-detected on each server.')) {
+      return
+    }
+    setGreLoading(true)
+    try {
+      const response = await api.post('/nodes/gre/setup', {})
+      const data = response.data
+      alert(
+        data?.message ||
+          `GRE ${data?.status}: Iran ${data?.iran?.inner} ↔ Foreign ${data?.foreign?.inner}`
+      )
+      fetchNodes()
+    } catch (error: any) {
+      console.error('GRE setup failed:', error)
+      alert(error.response?.data?.detail || error.message || 'GRE setup failed')
+    } finally {
+      setGreLoading(false)
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-[400px]">
@@ -129,6 +151,14 @@ const Nodes = () => {
           <p className="text-gray-500 dark:text-gray-400">{t.nodes.subtitle}</p>
         </div>
         <div className="flex gap-3">
+          <button
+            onClick={setupGre}
+            disabled={greLoading}
+            className="px-4 py-2.5 bg-teal-600 text-white rounded-lg hover:bg-teal-700 disabled:opacity-60 transition-all duration-200 font-medium shadow-sm hover:shadow-md flex items-center gap-2"
+            title="Auto-create GRE Iran↔Foreign (any NIC name)"
+          >
+            {greLoading ? 'Setting GRE…' : 'Setup GRE'}
+          </button>
           <button
             onClick={showCA}
             className="px-4 py-2.5 bg-green-600 text-white rounded-lg hover:bg-green-700 transition-all duration-200 font-medium shadow-sm hover:shadow-md flex items-center gap-2"
