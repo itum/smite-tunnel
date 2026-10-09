@@ -74,8 +74,13 @@ async def create_node(node: NodeCreate, db: AsyncSession = Depends(get_db)):
         
         existing.last_seen = datetime.utcnow()
         existing.status = "active"
-        existing.node_metadata.update(metadata)
-        existing.node_metadata["role"] = existing_role
+        # Replace JSON blob so SQLAlchemy persists nested updates (gre_peers, etc.).
+        from sqlalchemy.orm.attributes import flag_modified
+        merged = dict(existing.node_metadata or {})
+        merged.update(metadata)
+        merged["role"] = existing_role
+        existing.node_metadata = merged
+        flag_modified(existing, "node_metadata")
         await db.commit()
         await db.refresh(existing)
         

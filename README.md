@@ -1,248 +1,210 @@
-# Smite - Tunneling Control Panel
+# Smite Tunnel
 
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="assets/SmiteD.png"/>
     <source media="(prefers-color-scheme: light)" srcset="assets/SmiteL.png"/>
-    <img src="assets/SmiteL.png" alt="Smite Logo" width="200"/>
+    <img src="assets/SmiteL.png" alt="Smite Tunnel Logo" width="200"/>
   </picture>
-  
-  **Modern tunnel management built on GOST, Backhaul, Rathole, Chisel, and FRP, featuring dual-node architecture, intuitive WebUI, real-time status tracking, and open-source freedom.**
-  
-  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-  [![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/)
-  [![FastAPI](https://img.shields.io/badge/FastAPI-0.104+-009688.svg)](https://fastapi.tiangolo.com/)
-  [![React](https://img.shields.io/badge/React-18+-61DAFB.svg)](https://reactjs.org/)
-  [![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-3178C6.svg)](https://www.typescriptlang.org/)
-  [![Docker](https://img.shields.io/badge/Docker-24.0+-2496ED.svg)](https://www.docker.com/)
-  [![Nginx](https://img.shields.io/badge/Nginx-1.25+-009639.svg)](https://www.nginx.com/)
-  [![SQLite](https://img.shields.io/badge/SQLite-3.42+-003B57.svg)](https://www.sqlite.org/)
+
+  **Dual-node tunnel control panel for Iran ↔ foreign servers.**
+
+  GOST · Backhaul · Rathole · Chisel · FRP · wstunnel · bore
+
+  [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+  [![Docker](https://img.shields.io/badge/Docker-required-2496ED.svg)](https://www.docker.com/)
 </div>
 
----
+Smite Tunnel is a panel plus node agent for reverse and forward tunnels. The **panel runs on the Iran (central) server**. Each machine that should carry tunnel traffic runs a **node**:
 
-## 🚀 Features
+| Role | What it does |
+|------|----------------|
+| **Iran node** | Public listen side. Runs reverse-tunnel *servers* and GOST forwarders. |
+| **Foreign node** | Private / origin side. Runs reverse-tunnel *clients* and hosts your real service (Xray, SSH, …). |
 
-- **Multiple Tunnel Types**: Support for TCP, UDP, WebSocket, gRPC, TCPMux via GOST, Backhaul, Rathole, Chisel, and FRP
-- **Unified Node Management**: Iran and Foreign nodes are manageable from a single panel for reverse tunnels
-- **Web UI**: Modern, intuitive web interface with real-time connection status tracking
-- **CLI Tools**: Powerful command-line tools for management
-- **Telegram Bot**: Panel statistics and automatic backups via Telegram
-- **GOST Forwarding**: Forward traffic from Iran nodes to Foreign servers with support for TCP, UDP, WebSocket, gRPC, and TCPMux
+The panel talks to both nodes over HTTP. When a GRE tunnel exists between Iran and foreign, **GOST automatically prefers the GRE inner IP** and **clamps TCP MSS (default 1360)** so large HTTPS (for example X/Twitter) does not stall.
 
 ---
 
-## 📋 Prerequisites
+## One-line install
 
-- Docker and Docker Compose installed
-- For Iran servers, install Docker first:
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/manageitir/docker/main/install-ubuntu.sh | sh
-  ```
+Run as **root**. Docker is installed automatically if it is missing.
 
----
-
-## 🔧 Panel Installation
-
-### Quick Install
+### Panel (Iran / central server)
 
 ```bash
-sudo bash -c "$(curl -sL https://raw.githubusercontent.com/zZedix/Smite/main/scripts/install.sh)"
+sudo bash -c "$(curl -sL https://raw.githubusercontent.com/itum/smite-tunnel/main/scripts/install.sh)"
 ```
 
-<details>
-<summary><strong>Manual Install</strong></summary>
+Defaults: panel on port **8000**, SQLite, no HTTPS. After it finishes:
 
-1. Clone the repository:
-```bash
-git clone https://github.com/zZedix/Smite.git
-cd Smite
-```
-
-2. Copy environment file and configure:
-```bash
-cp .env.example .env
-# Edit .env with your settings
-```
-
-3. Install CLI tools:
-```bash
-sudo bash cli/install_cli.sh
-```
-
-4. Start services:
-```bash
-docker compose up -d
-```
-
-5. Create admin user:
 ```bash
 smite admin create
 ```
 
-6. Access the web interface at `http://localhost:8000`
+Open `http://YOUR_IRAN_IP:8000` and log in.
 
-</details>
+### Node (every tunnel host)
+
+Install a node on **Iran** (role: Iran) **and** on **foreign** (role: Foreign).
+
+```bash
+sudo bash -c "$(curl -sL https://raw.githubusercontent.com/itum/smite-tunnel/main/scripts/smite-node.sh)"
+```
+
+You will be asked for:
+
+1. **Panel address** — Iran panel host, for example `185.126.7.74:8000`
+2. **Panel API port** — usually `8000`
+3. **Node API port** — default `8888`
+4. **Node name**
+5. **Role** — `1` Iran or `2` Foreign
+6. **CA certificate** (paste, then empty line):
+   - Iran node → panel **Iran Nodes → CA certificate** (`ca.crt`)
+   - Foreign node → panel **Foreign Nodes → Foreign Server CA** (`ca-server.crt`)
+
+The node registers itself. You should see it **connected** in the panel. Do **not** run a second panel on the foreign server.
 
 ---
 
-## 🖥️ Node Installation
+## Typical setup
 
-### Architecture
+1. Install the **panel** on the Iran IP.
+2. Create an admin: `smite admin create`.
+3. Install an **Iran node** on the same (or another) Iran machine; paste the Iran CA.
+4. Install a **foreign node** on the origin server; paste the Foreign CA.
+5. In **Tunnels**, create a tunnel (GOST is the right choice when the service already listens on the foreign public IP).
 
-- **Iran Nodes**: Handle reverse tunnels (Rathole, Backhaul, Chisel, FRP) and run GOST forwarders
-- **Foreign Nodes**: Participate in reverse tunnels and receive forwarded traffic from Iran nodes
+Example: Xray/VLESS on foreign `:23534`. Create a **GOST TCP** tunnel with port `23534`. Clients use the Iran IP:
 
-### Quick Install
-
-```bash
-sudo bash -c "$(curl -sL https://raw.githubusercontent.com/zZedix/Smite/main/scripts/smite-node.sh)"
+```
+vless://UUID@IRAN_IP:23534?encryption=none&security=none&type=tcp#via-smite
 ```
 
-<details>
-<summary><strong>Manual Install</strong></summary>
+Direct access remains `FOREIGN_IP:23534`. If GRE exists, the panel forwards Iran → GRE peer inner IP (for example `172.17.1.1`) instead of the lossy public path.
 
-1. Navigate to node directory:
+---
+
+## Tunnel cores
+
+| Core | Mode | Use when |
+|------|------|----------|
+| **GOST** | Forward (Iran → foreign) | Service already listens on foreign. Iran publishes the same port. Best for VLESS/TCP/UDP/WS/gRPC/TCPMux. Auto GRE + MSS. |
+| **FRP** | Reverse | Foreign `frpc` connects to Iran `frps`. TCP/UDP. Local service on foreign is `127.0.0.1`. |
+| **Chisel** | Reverse | HTTP/WS reverse TCP. Control port defaults to listen port + 10000. |
+| **Rathole** | Reverse | TCP or WebSocket reverse tunnel. |
+| **Backhaul** | Reverse | TCP, UDP, WS, WSMux, TCPMux, with extra mux/keepalive options. |
+| **wstunnel** | Reverse | TCP (or UDP) over WebSocket; useful when only HTTP(S) is allowed. |
+| **bore** | Reverse | Simple TCP reverse tunnel. **One shared server per Iran node on control port 7835.** Same secret for extra bore tunnels on that node. |
+
+**Which to pick**
+
+- Public origin already open on foreign (Xray inbound): **GOST**.
+- Origin only on `127.0.0.1` on foreign: **FRP / Chisel / Rathole / Backhaul / wstunnel / bore**.
+- If reverse cores connect but **download stays at zero**, the Iran↔foreign control path is dropping packets — switch to **GOST** (or GRE + GOST).
+
+GOST types: TCP, UDP, WebSocket, gRPC, TCPMux.  
+FRP / bore: TCP (FRP also UDP).  
+Chisel: TCP. Rathole: TCP / WS. Backhaul: TCP, UDP, WS, WSMux, TCPMux. wstunnel: TCP / UDP.
+
+---
+
+## Network optimizations (automatic)
+
+On tunnel apply, Iran nodes:
+
+- Discover GRE/IP tunnels (`ip tunnel` / `ip link`)
+- Register `gre_peers` (iface, public remote, inner IPs, MTU) with the panel
+- Prefer GRE inner IP for GOST when the foreign public IP matches a GRE peer
+- Enable TCP MTU probing and **TCPMSS 1360** on tunnel ports (GRE MTU 1472 → max MSS 1432; 1360 leaves room for PPPoE/mobile)
+
+No extra panel clicks are required.
+
+---
+
+## CLI
+
+Panel (`smite`):
+
 ```bash
-cd node
+smite admin create
+smite admin update
+smite status
+smite logs
+smite restart
+smite update
 ```
 
-2. Copy Panel CA certificate:
+Node (`smite-node`):
+
 ```bash
-mkdir -p certs
-# For Iran nodes, use ca.crt
-cp /path/to/panel/ca.crt certs/ca.crt
-# For Foreign servers, use ca-server.crt
-# cp /path/to/panel/ca-server.crt certs/ca.crt
+smite-node status
+smite-node logs
+smite-node restart
+smite-node update
 ```
 
-3. Create `.env` file:
+---
+
+## Manual install
+
+**Panel**
+
 ```bash
-cat > .env << EOF
+git clone https://github.com/itum/smite-tunnel.git /opt/smite
+cd /opt/smite
+cp .env.example .env
+# set PANEL_PORT, SECRET_KEY, …
+mkdir -p panel/data panel/certs
+docker compose up -d --build
+smite admin create   # or: bash cli/install_cli.sh first
+```
+
+**Node**
+
+```bash
+mkdir -p /opt/smite-node/certs /opt/smite-node/config
+# copy ca.crt (Iran) or ca-server.crt as certs/ca.crt (Foreign)
+cat >/opt/smite-node/.env <<EOF
 NODE_API_PORT=8888
-NODE_NAME=node-1
+NODE_NAME=my-node
+NODE_ROLE=iran
 PANEL_CA_PATH=/etc/smite-node/certs/ca.crt
-PANEL_ADDRESS=panel.example.com:443
+PANEL_ADDRESS=PANEL_IP:8000
+PANEL_API_PORT=8000
+SMITE_VERSION=latest
 EOF
+# NODE_ROLE=foreign on the origin server
+cp -a node/. /opt/smite-node/   # from this repo
+cd /opt/smite-node && docker compose up -d --build
 ```
 
-> **Note**: The panel validates node roles during registration. Each node must have a consistent role (iran or foreign) to prevent conflicts.
-
-4. Start node:
-```bash
-docker compose up -d
-```
-
-</details>
+Images are built locally if `ghcr.io/zzedix/smite-panel` / `smite-node` are not available.
 
 ---
 
-## 🛠️ CLI Tools
+## Ports
 
-### Panel CLI (`smite`)
+| Port | Service |
+|------|---------|
+| 8000 | Panel HTTP (configurable) |
+| 8888 | Node API |
+| 80 / 443 | Optional nginx + Let's Encrypt (`install.sh` HTTPS prompt) |
+| Tunnel ports | Whatever you set in Tunnels (for example 23534) |
+| 7835 | Bore control (fixed) |
 
-**Admin Management:**
-```bash
-smite admin create      # Create admin user
-smite admin update      # Update admin password
-```
-
-**Panel Management:**
-```bash
-smite status            # Show system status
-smite update            # Update panel (pull images and recreate)
-smite restart           # Restart panel (recreate to pick up .env changes)
-smite logs              # View panel logs
-```
-
-**Configuration:**
-```bash
-smite edit              # Edit docker-compose.yml
-smite edit-env          # Edit .env file
-```
-
-### Node CLI (`smite-node`)
-
-**Node Management:**
-```bash
-smite-node status       # Show node status
-smite-node update       # Update node (pull images and recreate)
-smite-node restart      # Restart node (recreate to pick up .env changes)
-smite-node logs         # View node logs
-```
-
-**Configuration:**
-```bash
-smite-node edit         # Edit docker-compose.yml
-smite-node edit-env     # Edit .env file
-```
+Open the panel port, node API if you manage from the panel host, and every **public listen** port on Iran.
 
 ---
 
-## 📖 Tunnel Types
+## Requirements
 
-### GOST Tunnels (Iran Node Forwarding)
-- **TCP**: Simple TCP forwarding
-- **UDP**: UDP packet forwarding
-- **WebSocket (WS)**: WebSocket protocol forwarding
-- **gRPC**: gRPC protocol forwarding
-- **TCPMux**: TCP multiplexing for multiple connections
-
-GOST tunnels run on Iran nodes and forward traffic to Foreign servers. When creating a GOST tunnel, specify both an Iran node and a Foreign server. The Iran node will listen on the specified port and forward all traffic to the Foreign server's IP address and port.
-
-### Backhaul Tunnels (Reverse Tunnel)
-- **TCP / UDP**: Low-latency reverse tunnels with optional UDP-over-TCP
-- **WS / WSMux**: WebSocket transports for CDN-friendly deployments
-- **TCPMux**: TCP multiplexing support
-- **Advanced Controls**: Configure multiplexing, keepalive, sniffer, and custom port maps per tunnel
-
-The panel automatically configures both Iran and Foreign nodes when creating a tunnel.
-
-### Rathole Tunnels (Reverse Tunnel)
-- **TCP**: Standard TCP reverse tunnel
-- **WebSocket (WS)**: WebSocket transport support
-
-Rathole tunnels allow you to expose services running on the Foreign node's network through the Iran node.
-
-### Chisel Tunnels (Reverse Tunnel)
-Chisel tunnels provide fast TCP reverse tunnel functionality, enabling you to expose services running on the Foreign node's network through the Iran node with high performance.
-
-### FRP Tunnels (Reverse Tunnel)
-FRP (Fast Reverse Proxy) tunnels provide reliable TCP/UDP reverse tunnel functionality. FRP supports both TCP and UDP protocols, with optional IPv6 support for tunneling IPv6 traffic over IPv4 networks.
+- Linux, root, Docker + Docker Compose v2
+- Iran install of Docker if needed: `curl -fsSL https://raw.githubusercontent.com/manageitir/docker/main/install-ubuntu.sh | sh`
+- Panel and nodes must reach each other on the panel API port (default 8000)
 
 ---
 
-## 📝 License
+## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
----
-
-## 💰 Donations
-
-If you find Smite useful and want to support its development, consider making a donation:
-
-### Cryptocurrency Donations
-
-- **Bitcoin (BTC)**: `bc1q637gahjssmv9g3903j88tn6uyy0w2pwuvsp5k0`
-- **Ethereum (ETH)**: `0x5B2eE8970E3B233F79D8c765E75f0705278098a0`
-- **Tron (TRX)**: `TSAsosG9oHMAjAr3JxPQStj32uAgAUmMp3`
-- **USDT (BEP20)**: `0x5B2eE8970E3B233F79D8c765E75f0705278098a0`
-- **TON**: `UQA-95WAUn_8pig7rsA9mqnuM5juEswKONSlu-jkbUBUhku6`
-
-### Other Ways to Support
-
-- ⭐ Star the repository if you find it useful
-- 🐛 Report bugs and suggest improvements
-- 📖 Improve documentation and translations
-- 🔗 Share with others who might benefit
-
----
-
-<div align="center">
-  
-  **Made with ❤️ by [zZedix](https://github.com/zZedix)**
-  
-  *Securing the digital world, one line of code at a time!*
-  
-</div>
+MIT. Original Smite project by [zZedix](https://github.com/zZedix/Smite). This tree is maintained at [itum/smite-tunnel](https://github.com/itum/smite-tunnel).

@@ -79,6 +79,13 @@ class PanelClient:
         except:
             node_ip = "0.0.0.0"
         
+        gre_peers = []
+        try:
+            from app.network_optimize import discover_gre_peers
+            gre_peers = discover_gre_peers()
+        except Exception as e:
+            logger.debug(f"GRE discovery skipped: {e}")
+
         registration_data = {
             "name": settings.node_name,
             "ip_address": node_ip,
@@ -88,7 +95,8 @@ class PanelClient:
                 "api_address": f"http://{node_ip}:{settings.node_api_port}",
                 "node_name": settings.node_name,
                 "panel_address": self.panel_address,
-                "role": settings.node_role  # "iran" or "foreign"
+                "role": settings.node_role,  # "iran" or "foreign"
+                "gre_peers": gre_peers,
             }
         }
         

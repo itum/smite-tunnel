@@ -131,3 +131,132 @@ def generate_token(length: int = 16) -> str:
     alphabet = string.ascii_letters + string.digits
     return ''.join(secrets.choice(alphabet) for _ in range(length))
 
+
+def generate_chisel_auth(length: int = 16) -> str:
+    """
+    Generate a Chisel --auth value in required user:pass form.
+    """
+    return f"smite:{generate_token(length)}"
+
+
+def normalize_chisel_auth(auth: Optional[str]) -> Optional[str]:
+    """
+    Ensure Chisel auth is user:pass. Legacy plain tokens become smite:<token>.
+    """
+    if not auth:
+        return auth
+    if ":" in auth:
+        return auth
+    return f"smite:{auth}"
+
+
+def generate_wstunnel_secret(length: int = 24) -> str:
+    """Generate a URL-path-safe secret for wstunnel --restrict-http-upgrade-path-prefix."""
+    return generate_token(length)
+
+
+def build_wstunnel_server_url(
+    host: str,
+    port: int,
+    secret: str,
+    use_tls: bool = False,
+) -> str:
+    """Build ws(s)://host:port/secret for the wstunnel client."""
+    scheme = "wss" if use_tls else "ws"
+    if is_valid_ipv6_address(host):
+        return f"{scheme}://[{host}]:{port}/{secret}"
+    return f"{scheme}://{host}:{port}/{secret}"
+
+
+# Bore uses a fixed control port (not configurable in upstream CLI).
+BORE_CONTROL_PORT = 7835
+
+# Safe TCP MSS for proxied tunnels (GRE MTU 1472 → max MSS 1432; leave margin).
+DEFAULT_TUNNEL_TCP_MSS = 1360
+
+
+def generate_bore_secret(length: int = 24) -> str:
+    """Generate authentication secret for bore server/client."""
+    return generate_token(length)
+
+
+def mss_for_mtu(mtu: int, default: int = DEFAULT_TUNNEL_TCP_MSS) -> int:
+    """Compute a safe TCP MSS from path MTU (IPv4+TCP headers = 40 bytes)."""
+    try:
+        mtu_i = int(mtu)
+    except (TypeError, ValueError):
+        return default
+    return max(536, min(default, mtu_i - 40))
+
+
+def resolve_gost_forward_target(
+    foreign_public_ip: Optional[str],
+    iran_gre_peers: Optional[list] = None,
+    foreign_gre_peers: Optional[list] = None,
+    iran_public_ip: Optional[str] = None,
+    explicit_remote_ip: Optional[str] = None,
+) -> dict:
+    """
+    Choose the best GOST forward target.
+
+    Prefer GRE inner peer IP when a GRE tunnel exists between Iran and foreign
+    nodes (more stable than the lossy public path). Falls back to public IP.
+    """
+    explicit = (explicit_remote_ip or "").strip() or None
+    foreign_public = (foreign_public_ip or "").strip() or None
+    iran_public = (iran_public_ip or "").strip() or None
+
+    # Keep deliberate custom targets (not the foreign public IP).
+    if explicit and explicit != foreign_public:
+        # Still annotate if explicit already is a known GRE inner IP.
+        for gre in iran_gre_peers or []:
+            if explicit == gre.get("peer_inner"):
+                return {
+                    "remote_ip": explicit,
+                    "via": "gre",
+                    "iface": gre.get("iface"),
+                    "mtu": gre.get("mtu") or 1472,
+                    "mss": mss_for_mtu(gre.get("mtu") or 1472),
+                    "public_ip": foreign_public,
+                }
+        return {
+            "remote_ip": explicit,
+            "via": "explicit",
+            "mtu": 1500,
+            "mss": DEFAULT_TUNNEL_TCP_MSS,
+            "public_ip": foreign_public,
+        }
+
+    for gre in iran_gre_peers or []:
+        if foreign_public and gre.get("remote") == foreign_public and gre.get("peer_inner"):
+            mtu = gre.get("mtu") or 1472
+            return {
+                "remote_ip": gre["peer_inner"],
+                "via": "gre",
+                "iface": gre.get("iface"),
+                "mtu": mtu,
+                "mss": mss_for_mtu(mtu),
+                "public_ip": foreign_public,
+            }
+
+    for gre in foreign_gre_peers or []:
+        if iran_public and gre.get("remote") == iran_public and gre.get("local_inner"):
+            mtu = gre.get("mtu") or 1472
+            return {
+                "remote_ip": gre["local_inner"],
+                "via": "gre",
+                "iface": gre.get("iface"),
+                "mtu": mtu,
+                "mss": mss_for_mtu(mtu),
+                "public_ip": foreign_public,
+            }
+
+    target = explicit or foreign_public or "127.0.0.1"
+    return {
+        "remote_ip": target,
+        "via": "public",
+        "mtu": 1500,
+        "mss": DEFAULT_TUNNEL_TCP_MSS,
+        "public_ip": foreign_public,
+    }
+

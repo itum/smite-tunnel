@@ -16,7 +16,7 @@ from app.node_client import NodeClient
 router = APIRouter()
 logger = logging.getLogger(__name__)
 
-CORES = ["backhaul", "rathole", "chisel", "frp"]
+CORES = ["backhaul", "rathole", "chisel", "frp", "wstunnel", "bore"]
 
 
 class CoreHealthResponse(BaseModel):
@@ -384,7 +384,8 @@ async def _reset_core(core: str, app_or_request, db: AsyncSession):
                 server_control_port = server_spec.get("control_port") or (int(listen_port) + 10000)
                 server_spec["server_port"] = server_control_port
                 server_spec["reverse_port"] = listen_port
-                auth = server_spec.get("auth")
+                from app.utils import normalize_chisel_auth
+                auth = normalize_chisel_auth(server_spec.get("auth"))
                 if auth:
                     server_spec["auth"] = auth
                 fingerprint = server_spec.get("fingerprint")
@@ -401,6 +402,73 @@ async def _reset_core(core: str, app_or_request, db: AsyncSession):
                 if not local_addr:
                     local_addr = f"{iran_node_ip}:{listen_port}"
                 client_spec["local_addr"] = local_addr
+
+            elif core == "wstunnel":
+                from app.utils import generate_wstunnel_secret, build_wstunnel_server_url
+                ports = server_spec.get("ports") or []
+                if isinstance(ports, str):
+                    ports = [p.strip() for p in ports.split(",") if p.strip()]
+                listen_port = server_spec.get("listen_port") or server_spec.get("remote_port")
+                if not ports and listen_port:
+                    ports = [listen_port]
+                if not ports:
+                    logger.warning(f"Tunnel {tunnel.id}: Missing ports for wstunnel, skipping")
+                    continue
+                iran_node_ip = iran_node.node_metadata.get("ip_address")
+                if not iran_node_ip:
+                    logger.warning(f"Tunnel {tunnel.id}: Iran node has no IP address, skipping")
+                    continue
+                first_port = int(ports[0]) if str(ports[0]).isdigit() else ports[0]
+                server_control_port = server_spec.get("control_port") or (int(first_port) + 10000)
+                secret = (server_spec.get("secret") or "").strip() or generate_wstunnel_secret()
+                tunnel_type = (tunnel.type or "tcp").lower()
+                if tunnel_type not in ("tcp", "udp"):
+                    tunnel_type = "tcp"
+                use_tls = bool(server_spec.get("use_tls", False))
+                server_spec["mode"] = "server"
+                server_spec["server_port"] = int(server_control_port)
+                server_spec["control_port"] = int(server_control_port)
+                server_spec["reverse_port"] = first_port
+                server_spec["ports"] = ports
+                server_spec["secret"] = secret
+                server_spec["type"] = tunnel_type
+                client_spec["mode"] = "client"
+                client_spec["server_url"] = build_wstunnel_server_url(
+                    iran_node_ip, int(server_control_port), secret, use_tls=use_tls
+                )
+                client_spec["ports"] = ports
+                client_spec["secret"] = secret
+                client_spec["type"] = tunnel_type
+                client_spec["local_addr"] = server_spec.get("local_addr") or f"127.0.0.1:{first_port}"
+
+            elif core == "bore":
+                from app.utils import BORE_CONTROL_PORT, generate_bore_secret
+                ports = server_spec.get("ports") or []
+                if isinstance(ports, str):
+                    ports = [p.strip() for p in ports.split(",") if p.strip()]
+                listen_port = server_spec.get("listen_port") or server_spec.get("remote_port")
+                if not ports and listen_port:
+                    ports = [listen_port]
+                if not ports:
+                    logger.warning(f"Tunnel {tunnel.id}: Missing ports for bore, skipping")
+                    continue
+                iran_node_ip = iran_node.node_metadata.get("ip_address")
+                if not iran_node_ip:
+                    logger.warning(f"Tunnel {tunnel.id}: Iran node has no IP address, skipping")
+                    continue
+                secret = (server_spec.get("secret") or "").strip() or generate_bore_secret()
+                server_spec["mode"] = "server"
+                server_spec["secret"] = secret
+                server_spec["control_port"] = BORE_CONTROL_PORT
+                server_spec["ports"] = ports
+                server_spec["type"] = "tcp"
+                client_spec["mode"] = "client"
+                client_spec["server_addr"] = iran_node_ip
+                client_spec["secret"] = secret
+                client_spec["control_port"] = BORE_CONTROL_PORT
+                client_spec["type"] = "tcp"
+                client_spec["local_host"] = server_spec.get("local_host") or "127.0.0.1"
+                client_spec["ports"] = [{"local": int(p), "remote": int(p)} for p in ports]
             
             elif core == "frp":
                 bind_port = server_spec.get("bind_port", 7000)

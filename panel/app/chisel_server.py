@@ -6,7 +6,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Optional
 
-from app.utils import parse_address_port, format_address_port
+from app.utils import parse_address_port, format_address_port, normalize_chisel_auth
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ class ChiselServerManager:
                 self.stop_server(tunnel_id)
             
             host = "0.0.0.0"
+            auth = normalize_chisel_auth(auth)
             
             cmd = [
                 "/usr/local/bin/chisel",

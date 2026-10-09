@@ -18,7 +18,7 @@ RUN set -eux; \
         *) ARCH="amd64" ;; \
     esac; \
     echo "Fetching FRP release"; \
-    FRP_VERSION="v0.65.0"; \
+    FRP_VERSION="v0.71.0"; \
     FRP_VERSION_NO_V="${FRP_VERSION#v}"; \
     FRP_URL="https://github.com/fatedier/frp/releases/download/${FRP_VERSION}/frp_${FRP_VERSION_NO_V}_linux_${ARCH}.tar.gz"; \
     FRP_TMP="$(mktemp -d)"; \

@@ -565,6 +565,15 @@ class BackhaulAdapter:
         )
 
 
+def _normalize_chisel_auth(auth: Optional[str]) -> Optional[str]:
+    """Ensure Chisel --auth is user:pass (required since Chisel 1.12)."""
+    if not auth:
+        return auth
+    if ":" in auth:
+        return auth
+    return f"smite:{auth}"
+
+
 class ChiselAdapter:
     """Chisel reverse tunnel adapter"""
     name = "chisel"
@@ -628,7 +637,7 @@ class ChiselAdapter:
                 "--reverse"
             ]
             
-            auth = spec.get('auth')
+            auth = _normalize_chisel_auth(spec.get('auth'))
             if auth:
                 cmd.extend(["--auth", auth])
             
@@ -675,7 +684,7 @@ class ChiselAdapter:
                 "client"
             ]
             
-            auth = spec.get('auth')
+            auth = _normalize_chisel_auth(spec.get('auth'))
             if auth:
                 cmd.extend(["--auth", auth])
             
@@ -1042,6 +1051,448 @@ serverPort: {server_port}
         }
 
 
+class BoreAdapter:
+    """
+    Bore TCP reverse tunnel (Iran=server, Foreign=client).
+
+    Upstream bore uses a fixed control port 7835, so only one bore server can
+    run per node. Multiple tunnels share that server when they use the same secret.
+    """
+    name = "bore"
+    CONTROL_PORT = 7835
+
+    _shared_server_proc = None
+    _shared_server_log = None
+    _shared_secret = None
+    _shared_server_tunnels = set()
+
+    def __init__(self):
+        self.config_dir = Path("/etc/smite-node/bore")
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        # tunnel_id -> list[Popen] for client mode (one process per port)
+        self.client_processes: Dict[str, List[subprocess.Popen]] = {}
+        self.log_handles: Dict[str, List] = {}
+
+    def _resolve_binary_path(self) -> Path:
+        env_path = os.environ.get("BORE_BINARY")
+        if env_path:
+            resolved = Path(env_path)
+            if resolved.exists() and resolved.is_file():
+                return resolved
+        for path in (Path("/usr/local/bin/bore"), Path("/usr/bin/bore")):
+            if path.exists() and path.is_file():
+                return path
+        resolved = shutil.which("bore")
+        if resolved:
+            return Path(resolved)
+        raise FileNotFoundError(
+            "bore binary not found. Expected at BORE_BINARY, '/usr/local/bin/bore', or in PATH."
+        )
+
+    def _shared_server_running(self) -> bool:
+        proc = BoreAdapter._shared_server_proc
+        return proc is not None and proc.poll() is None
+
+    def _start_shared_server(self, secret: str, tunnel_id: str):
+        if self._shared_server_running():
+            if BoreAdapter._shared_secret != secret:
+                raise RuntimeError(
+                    "Bore control port 7835 is already in use by another bore server with a different secret. "
+                    "Only one bore server can run per node; reuse the existing bore tunnel secret or remove it first."
+                )
+            BoreAdapter._shared_server_tunnels.add(tunnel_id)
+            logger.info(f"Reusing shared bore server for tunnel {tunnel_id}")
+            return
+
+        binary_path = self._resolve_binary_path()
+        cmd = [
+            str(binary_path),
+            "server",
+            "--secret",
+            secret,
+            "--bind-addr",
+            "0.0.0.0",
+            "--min-port",
+            "1",
+            "--max-port",
+            "65535",
+        ]
+        log_file = self.config_dir / "shared_server.log"
+        log_f = open(log_file, "w", buffering=1)
+        log_f.write(f"Starting shared bore server for tunnel {tunnel_id}\n")
+        log_f.write(f"Command: {' '.join(cmd)}\n")
+        log_f.flush()
+        try:
+            proc = subprocess.Popen(
+                cmd,
+                stdout=log_f,
+                stderr=subprocess.STDOUT,
+                cwd=str(self.config_dir),
+                start_new_session=True,
+            )
+        except FileNotFoundError:
+            log_f.close()
+            raise RuntimeError("bore binary not found. Please install bore.")
+
+        time.sleep(0.8)
+        if proc.poll() is not None:
+            err = ""
+            if log_file.exists():
+                with open(log_file, "r") as f:
+                    err = f.read()
+            log_f.close()
+            raise RuntimeError(
+                f"bore server failed to start: {err[-500:] if len(err) > 500 else err}"
+            )
+
+        BoreAdapter._shared_server_proc = proc
+        BoreAdapter._shared_server_log = log_f
+        BoreAdapter._shared_secret = secret
+        BoreAdapter._shared_server_tunnels = {tunnel_id}
+        logger.info(f"Started shared bore server (PID {proc.pid}) for tunnel {tunnel_id}")
+
+    def _release_shared_server(self, tunnel_id: str):
+        BoreAdapter._shared_server_tunnels.discard(tunnel_id)
+        if BoreAdapter._shared_server_tunnels:
+            return
+        proc = BoreAdapter._shared_server_proc
+        if proc is not None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            except Exception:
+                pass
+        if BoreAdapter._shared_server_log is not None:
+            try:
+                BoreAdapter._shared_server_log.close()
+            except Exception:
+                pass
+        BoreAdapter._shared_server_proc = None
+        BoreAdapter._shared_server_log = None
+        BoreAdapter._shared_secret = None
+
+    def apply(self, tunnel_id: str, spec: Dict[str, Any]):
+        if tunnel_id in self.client_processes or tunnel_id in BoreAdapter._shared_server_tunnels:
+            logger.info(f"Bore tunnel {tunnel_id} already exists, removing it first")
+            self.remove(tunnel_id)
+
+        mode = spec.get("mode", "client")
+        secret = (spec.get("secret") or spec.get("token") or "").strip()
+        if not secret:
+            raise ValueError("Bore requires 'secret' in spec")
+
+        binary_path = self._resolve_binary_path()
+
+        if mode == "server":
+            self._start_shared_server(secret, tunnel_id)
+            return
+
+        server_addr = (spec.get("server_addr") or "").strip()
+        if not server_addr:
+            raise ValueError("Bore client requires 'server_addr' (Iran node IP/host) in spec")
+        if server_addr.startswith("[") and server_addr.endswith("]"):
+            server_addr = server_addr[1:-1]
+
+        ports = spec.get("ports", [])
+        if not ports:
+            remote_port = spec.get("remote_port") or spec.get("listen_port")
+            local_port = spec.get("local_port") or remote_port
+            if remote_port:
+                ports = [{"local": local_port or remote_port, "remote": remote_port}]
+
+        if not ports:
+            raise ValueError("Bore client requires 'ports' or 'remote_port'/'listen_port' in spec")
+
+        local_host = spec.get("local_host") or "127.0.0.1"
+        procs: List[subprocess.Popen] = []
+        logs = []
+        try:
+            for i, port_config in enumerate(ports):
+                if isinstance(port_config, dict):
+                    local_port = int(port_config.get("local") or port_config.get("remote"))
+                    remote_port = int(port_config.get("remote") or local_port)
+                else:
+                    local_port = remote_port = int(port_config)
+
+                cmd = [
+                    str(binary_path),
+                    "local",
+                    str(local_port),
+                    "--to",
+                    server_addr,
+                    "--port",
+                    str(remote_port),
+                    "--local-host",
+                    local_host,
+                    "--secret",
+                    secret,
+                ]
+                log_file = self.config_dir / f"{tunnel_id}_{remote_port}.log"
+                log_f = open(log_file, "w", buffering=1)
+                log_f.write(f"Starting bore client for tunnel {tunnel_id}\n")
+                log_f.write(f"Command: {' '.join(cmd)}\n")
+                log_f.flush()
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                    cwd=str(self.config_dir),
+                    start_new_session=True,
+                )
+                time.sleep(1.0)
+                if proc.poll() is not None:
+                    err = ""
+                    if log_file.exists():
+                        with open(log_file, "r") as f:
+                            err = f.read()
+                    log_f.close()
+                    raise RuntimeError(
+                        f"bore client failed for port {remote_port}: {err[-500:] if len(err) > 500 else err}"
+                    )
+                procs.append(proc)
+                logs.append(log_f)
+        except Exception:
+            for p in procs:
+                try:
+                    p.terminate()
+                    p.wait(timeout=3)
+                except Exception:
+                    pass
+            for lf in logs:
+                try:
+                    lf.close()
+                except Exception:
+                    pass
+            raise
+
+        self.client_processes[tunnel_id] = procs
+        self.log_handles[tunnel_id] = logs
+        logger.info(f"Bore client tunnel {tunnel_id}: {len(procs)} port(s) to {server_addr}")
+
+    def remove(self, tunnel_id: str):
+        if tunnel_id in self.client_processes:
+            for proc in self.client_processes.pop(tunnel_id, []):
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait()
+                except Exception:
+                    pass
+        if tunnel_id in self.log_handles:
+            for lf in self.log_handles.pop(tunnel_id, []):
+                try:
+                    lf.close()
+                except Exception:
+                    pass
+        if tunnel_id in BoreAdapter._shared_server_tunnels:
+            self._release_shared_server(tunnel_id)
+
+    def status(self, tunnel_id: str) -> Dict[str, Any]:
+        if tunnel_id in self.client_processes:
+            procs = self.client_processes[tunnel_id]
+            is_running = bool(procs) and all(p.poll() is None for p in procs)
+            return {"active": is_running, "type": "bore", "process_running": is_running}
+        if tunnel_id in BoreAdapter._shared_server_tunnels:
+            is_running = self._shared_server_running()
+            return {"active": is_running, "type": "bore", "process_running": is_running}
+        return {"active": False, "type": "bore", "process_running": False}
+
+
+class WstunnelAdapter:
+    """Wstunnel reverse tunnel over WebSocket/HTTP2 (Iran=server, Foreign=client)"""
+    name = "wstunnel"
+
+    def __init__(self):
+        self.config_dir = Path("/etc/smite-node/wstunnel")
+        self.config_dir.mkdir(parents=True, exist_ok=True)
+        self.processes = {}
+        self.log_handles = {}
+
+    def _resolve_binary_path(self) -> Path:
+        env_path = os.environ.get("WSTUNNEL_BINARY")
+        if env_path:
+            resolved = Path(env_path)
+            if resolved.exists() and resolved.is_file():
+                return resolved
+
+        for path in (Path("/usr/local/bin/wstunnel"), Path("/usr/bin/wstunnel")):
+            if path.exists() and path.is_file():
+                return path
+
+        resolved = shutil.which("wstunnel")
+        if resolved:
+            return Path(resolved)
+
+        raise FileNotFoundError(
+            "wstunnel binary not found. Expected at WSTUNNEL_BINARY, '/usr/local/bin/wstunnel', or in PATH."
+        )
+
+    def apply(self, tunnel_id: str, spec: Dict[str, Any]):
+        if tunnel_id in self.processes:
+            logger.info(f"Wstunnel tunnel {tunnel_id} already exists, removing it first")
+            self.remove(tunnel_id)
+
+        mode = spec.get("mode", "client")
+        secret = (spec.get("secret") or spec.get("token") or "").strip()
+        if not secret:
+            raise ValueError("Wstunnel requires 'secret' (path prefix) in spec")
+
+        binary_path = self._resolve_binary_path()
+        tunnel_type = str(spec.get("type", "tcp")).lower()
+        if tunnel_type not in ("tcp", "udp"):
+            tunnel_type = "tcp"
+
+        if mode == "server":
+            server_port = spec.get("server_port") or spec.get("control_port")
+            if not server_port:
+                raise ValueError("Wstunnel server requires 'server_port' or 'control_port' in spec")
+
+            use_ipv6 = bool(spec.get("use_ipv6", False))
+            listen_host = "[::]" if use_ipv6 else "0.0.0.0"
+            listen_url = f"ws://{listen_host}:{int(server_port)}"
+
+            cmd = [
+                str(binary_path),
+                "server",
+                "--restrict-http-upgrade-path-prefix",
+                secret,
+                listen_url,
+            ]
+
+            log_file = self.config_dir / f"{tunnel_id}.log"
+            log_f = open(log_file, "w", buffering=1)
+            try:
+                log_f.write(f"Starting wstunnel server for tunnel {tunnel_id}\n")
+                log_f.write(f"Command: {' '.join(cmd)}\n")
+                log_f.write(f"server_port={server_port}, secret=set\n")
+                log_f.flush()
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                    cwd=str(self.config_dir),
+                    start_new_session=True,
+                )
+            except FileNotFoundError:
+                log_f.close()
+                raise RuntimeError("wstunnel binary not found. Please install wstunnel.")
+        else:
+            server_url = (spec.get("server_url") or "").strip()
+            if not server_url:
+                raise ValueError("Wstunnel client requires 'server_url' in spec")
+
+            ports = spec.get("ports", [])
+            if not ports:
+                reverse_port = (
+                    spec.get("reverse_port")
+                    or spec.get("remote_port")
+                    or spec.get("listen_port")
+                    or spec.get("server_port")
+                )
+                if reverse_port:
+                    ports = [reverse_port]
+
+            if not ports:
+                raise ValueError("Wstunnel client requires 'ports' or 'reverse_port'/'listen_port' in spec")
+
+            cmd = [str(binary_path), "client"]
+            for port in ports:
+                port_num = int(port) if isinstance(port, (int, str)) and str(port).isdigit() else port
+                local_addr = spec.get("local_addr")
+                if not local_addr:
+                    local_addr = f"127.0.0.1:{port_num}"
+
+                host, local_port, is_ipv6 = parse_address_port(local_addr)
+                if not local_port:
+                    host = "127.0.0.1"
+                    local_port = port_num
+                    is_ipv6 = False
+
+                if is_ipv6:
+                    reverse_spec = f"{tunnel_type}://0.0.0.0:{port_num}:[{host}]:{local_port}"
+                else:
+                    reverse_spec = f"{tunnel_type}://0.0.0.0:{port_num}:{host}:{local_port}"
+                cmd.extend(["-R", reverse_spec])
+
+            cmd.append(server_url)
+
+            log_file = self.config_dir / f"{tunnel_id}.log"
+            log_f = open(log_file, "w", buffering=1)
+            try:
+                log_f.write(f"Starting wstunnel client for tunnel {tunnel_id}\n")
+                log_f.write(f"Command: {' '.join(cmd)}\n")
+                log_f.write(f"server_url={server_url}, ports={ports}, type={tunnel_type}\n")
+                log_f.flush()
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=log_f,
+                    stderr=subprocess.STDOUT,
+                    cwd=str(self.config_dir),
+                    start_new_session=True,
+                )
+            except FileNotFoundError:
+                log_f.close()
+                raise RuntimeError("wstunnel binary not found. Please install wstunnel.")
+
+        self.log_handles[tunnel_id] = log_f
+        self.processes[tunnel_id] = proc
+        time.sleep(1.0)
+        if proc.poll() is not None:
+            stderr = ""
+            if log_file.exists():
+                with open(log_file, "r") as f:
+                    stderr = f.read()
+            if tunnel_id in self.log_handles:
+                try:
+                    self.log_handles[tunnel_id].close()
+                except Exception:
+                    pass
+                del self.log_handles[tunnel_id]
+            raise RuntimeError(
+                f"wstunnel failed to start: {stderr[-500:] if len(stderr) > 500 else stderr}"
+            )
+
+    def remove(self, tunnel_id: str):
+        if tunnel_id in self.processes:
+            proc = self.processes[tunnel_id]
+            try:
+                proc.terminate()
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait()
+            except Exception:
+                pass
+            del self.processes[tunnel_id]
+
+        if tunnel_id in self.log_handles:
+            try:
+                self.log_handles[tunnel_id].close()
+            except Exception:
+                pass
+            del self.log_handles[tunnel_id]
+
+        try:
+            subprocess.run(["pkill", "-f", f"wstunnel.*{tunnel_id}"], check=False, timeout=3)
+        except Exception:
+            pass
+
+    def status(self, tunnel_id: str) -> Dict[str, Any]:
+        is_running = False
+        if tunnel_id in self.processes:
+            is_running = self.processes[tunnel_id].poll() is None
+        return {
+            "active": is_running,
+            "type": "wstunnel",
+            "process_running": is_running,
+        }
+
+
 class GostAdapter:
     """GOST forwarding adapter - forwards from Iran node to Foreign server"""
     name = "gost"
@@ -1096,9 +1547,44 @@ class GostAdapter:
             raise ValueError("GOST requires 'ports' array or 'listen_port'/'remote_port' in spec")
         if not forward_to and not remote_ip:
             raise ValueError("GOST requires 'forward_to' or 'remote_ip' in spec")
+
+        # Prefer GRE inner IP when panel didn't already resolve it but public+GRE exist.
+        public_ip = (spec.get("public_ip") or spec.get("foreign_public_ip") or "").strip()
+        if public_ip and remote_ip in (public_ip, "", None):
+            try:
+                from app.network_optimize import pick_gre_forward_ip
+                gre = pick_gre_forward_ip(public_ip)
+                if gre and gre.get("peer_inner"):
+                    remote_ip = gre["peer_inner"]
+                    spec = {**spec, "remote_ip": remote_ip, "forward_via": "gre",
+                            "forward_mtu": gre.get("mtu"), "forward_iface": gre.get("iface")}
+                    logger.info(
+                        f"GOST {tunnel_id}: using GRE peer {remote_ip} "
+                        f"(iface={gre.get('iface')}, mtu={gre.get('mtu')}) for {public_ip}"
+                    )
+            except Exception as e:
+                logger.warning(f"GOST GRE prefer skipped: {e}")
         
         tunnel_type = spec.get('type', 'tcp').lower()
         use_ipv6 = spec.get('use_ipv6', False)
+
+        # MSS/MTU clamp so large HTTPS (X/Twitter etc.) works through the proxy path.
+        try:
+            from app.network_optimize import ensure_mtu_optimizations, mss_for_mtu
+            path_mtu = spec.get("forward_mtu") or spec.get("mss_mtu") or (1472 if spec.get("forward_via") == "gre" else 1500)
+            listen_ports = []
+            for p in ports:
+                try:
+                    listen_ports.append(int(p) if not isinstance(p, int) else p)
+                except Exception:
+                    pass
+            ensure_mtu_optimizations(
+                listen_ports=listen_ports,
+                path_mtu=int(path_mtu),
+                mss=spec.get("tcp_mss") or mss_for_mtu(int(path_mtu)),
+            )
+        except Exception as e:
+            logger.warning(f"GOST MTU optimize skipped: {e}")
         
         binary_path = self._resolve_binary_path()
         cmd = [str(binary_path)]
@@ -1240,6 +1726,8 @@ class AdapterManager:
             "backhaul": BackhaulAdapter(),
             "chisel": ChiselAdapter(),
             "frp": FrpAdapter(),
+            "wstunnel": WstunnelAdapter(),
+            "bore": BoreAdapter(),
             "gost": GostAdapter(),
         }
         self.active_tunnels: Dict[str, CoreAdapter] = {}
@@ -1361,7 +1849,7 @@ class AdapterManager:
                 mode = spec.get('mode', 'N/A')
                 logger.info(f"Restoring tunnel {tunnel_id}: core={tunnel_core}, mode={mode}, spec_keys={list(spec.keys())}")
                 
-                if tunnel_core in ["rathole", "backhaul", "chisel", "frp"] and mode == 'N/A':
+                if tunnel_core in ["rathole", "backhaul", "chisel", "frp", "wstunnel", "bore"] and mode == 'N/A':
                     logger.warning(f"Tunnel {tunnel_id}: Reverse tunnel missing mode field, defaulting to client")
                     spec['mode'] = 'client'
                 
@@ -1396,6 +1884,40 @@ class AdapterManager:
             raise ValueError(error_msg)
         
         logger.info(f"Using adapter: {adapter.name}, mode={spec.get('mode', 'N/A')}")
+
+        # Apply MSS clamp for any tunnel that exposes listen/remote ports.
+        try:
+            from app.network_optimize import ensure_mtu_optimizations, mss_for_mtu
+            port_candidates = []
+            for key in ("ports",):
+                raw = spec.get(key) or []
+                if isinstance(raw, list):
+                    for item in raw:
+                        if isinstance(item, dict):
+                            for k in ("local", "remote", "listen_port", "public_port"):
+                                if item.get(k) is not None:
+                                    port_candidates.append(item.get(k))
+                        else:
+                            port_candidates.append(item)
+            for key in ("listen_port", "remote_port", "reverse_port", "public_port", "bind_port", "control_port"):
+                if spec.get(key) is not None:
+                    port_candidates.append(spec.get(key))
+            listen_ports = []
+            for p in port_candidates:
+                try:
+                    listen_ports.append(int(p))
+                except Exception:
+                    pass
+            path_mtu = spec.get("forward_mtu") or (1472 if spec.get("forward_via") == "gre" else None)
+            if listen_ports or path_mtu:
+                ensure_mtu_optimizations(
+                    listen_ports=sorted(set(listen_ports)),
+                    path_mtu=int(path_mtu) if path_mtu else None,
+                    mss=spec.get("tcp_mss") or (mss_for_mtu(int(path_mtu)) if path_mtu else None),
+                )
+        except Exception as e:
+            logger.debug(f"MTU optimize for {tunnel_id} skipped: {e}")
+
         adapter.apply(tunnel_id, spec)
         self.active_tunnels[tunnel_id] = adapter
         

@@ -332,6 +332,8 @@ const Tunnels = () => {
               backhaul: { bg: 'bg-blue-100 dark:bg-blue-900/30', text: 'text-blue-800 dark:text-blue-200', border: 'border-blue-300 dark:border-blue-700' },
               chisel: { bg: 'bg-orange-100 dark:bg-orange-900/30', text: 'text-orange-800 dark:text-orange-200', border: 'border-orange-300 dark:border-orange-700' },
               frp: { bg: 'bg-cyan-100 dark:bg-cyan-900/30', text: 'text-cyan-800 dark:text-cyan-200', border: 'border-cyan-300 dark:border-cyan-700' },
+              wstunnel: { bg: 'bg-teal-100 dark:bg-teal-900/30', text: 'text-teal-800 dark:text-teal-200', border: 'border-teal-300 dark:border-teal-700' },
+              bore: { bg: 'bg-lime-100 dark:bg-lime-900/30', text: 'text-lime-800 dark:text-lime-200', border: 'border-lime-300 dark:border-lime-700' },
               gost: { bg: 'bg-indigo-100 dark:bg-indigo-900/30', text: 'text-indigo-800 dark:text-indigo-200', border: 'border-indigo-300 dark:border-indigo-700' },
             }
             return coreColors[tunnel.core] || { bg: 'bg-gray-100 dark:bg-gray-700', text: 'text-gray-800 dark:text-gray-200', border: 'border-gray-300 dark:border-gray-600' }
@@ -374,6 +376,10 @@ const Tunnels = () => {
                       {(() => {
                         let transmissionType = null
                         if (tunnel.core === 'chisel') {
+                          transmissionType = 'TCP'
+                        } else if (tunnel.core === 'wstunnel') {
+                          transmissionType = (tunnel.type || 'tcp').toUpperCase()
+                        } else if (tunnel.core === 'bore') {
                           transmissionType = 'TCP'
                         } else if (tunnel.core === 'rathole') {
                           const transport = tunnel.spec?.transport || (tunnel.type && tunnel.type !== 'rathole' ? tunnel.type : 'tcp')
@@ -431,6 +437,10 @@ const Tunnels = () => {
                           if (!corePort) corePort = '23333'
                         } else if (tunnel.core === 'chisel') {
                           corePort = tunnel.spec?.control_port || tunnel.spec?.server_port
+                        } else if (tunnel.core === 'wstunnel') {
+                          corePort = tunnel.spec?.control_port || tunnel.spec?.server_port
+                        } else if (tunnel.core === 'bore') {
+                          corePort = tunnel.spec?.control_port || '7835'
                         } else if (tunnel.core === 'backhaul') {
                           corePort = tunnel.spec?.control_port || tunnel.spec?.public_port || '3080'
                         } else if (tunnel.core === 'frp') {
@@ -577,6 +587,7 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
       return parsed.port?.toString() || ''
     })() : '',
     chisel_control_port: tunnel.spec?.control_port ? tunnel.spec.control_port.toString() : '',
+    wstunnel_control_port: tunnel.core === 'wstunnel' && tunnel.spec?.control_port ? tunnel.spec.control_port.toString() : '',
     frp_bind_port: tunnel.spec?.bind_port ? tunnel.spec.bind_port.toString() : '7000',
     frp_token: tunnel.spec?.token || '',
     frp_local_ip: tunnel.spec?.local_ip || '127.0.0.1',
@@ -642,6 +653,25 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
         if (formData.node_ipv6) {
           updatedSpec.node_ipv6 = formData.node_ipv6
         }
+      } else if (tunnel.core === 'wstunnel') {
+        updatedSpec.ports = ports
+        const firstPort = ports[0]
+        updatedSpec.listen_port = firstPort
+        updatedSpec.remote_port = firstPort
+        const controlPort = formData.wstunnel_control_port
+          ? parseInt(formData.wstunnel_control_port.toString())
+          : firstPort + 10000
+        updatedSpec.control_port = controlPort
+        updatedSpec.type = tunnel.type === 'udp' ? 'udp' : 'tcp'
+        updatedSpec.local_addr = `127.0.0.1:${firstPort}`
+      } else if (tunnel.core === 'bore') {
+        updatedSpec.ports = ports
+        const firstPort = ports[0]
+        updatedSpec.listen_port = firstPort
+        updatedSpec.remote_port = firstPort
+        updatedSpec.control_port = 7835
+        updatedSpec.type = 'tcp'
+        updatedSpec.local_host = '127.0.0.1'
       } else if (tunnel.core === 'frp') {
         const bindPort = parseInt(formData.frp_bind_port) || 7000
         updatedSpec.bind_port = bindPort
@@ -866,6 +896,85 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
               )}
             </>
           )}
+
+          {tunnel.core === 'wstunnel' && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Ports
+                </label>
+                <input
+                  type="text"
+                  value={formData.ports}
+                  onChange={(e) =>
+                    setFormData({ ...formData, ports: e.target.value })
+                  }
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white"
+                  placeholder="8080,8081,8082"
+                  required
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Public ports on Iran node (forwarded to same ports on foreign)
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Control Port
+                </label>
+                <input
+                  type="number"
+                  value={formData.wstunnel_control_port}
+                  onChange={(e) =>
+                    setFormData({ ...formData, wstunnel_control_port: e.target.value })
+                  }
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white"
+                  placeholder={`${(parseInt(formData.ports.split(',')[0]?.trim()) || 8080) + 10000} (auto)`}
+                  min="1"
+                  max="65535"
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Wstunnel WebSocket control port (leave empty for auto: first port + 10000)
+                </p>
+              </div>
+            </>
+          )}
+
+          {tunnel.core === 'bore' && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Ports
+                </label>
+                <input
+                  type="text"
+                  value={formData.ports}
+                  onChange={(e) =>
+                    setFormData({ ...formData, ports: e.target.value })
+                  }
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white"
+                  placeholder="8080,8081,8082"
+                  required
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Public TCP ports on Iran (forwarded to same ports on foreign)
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Control Port
+                </label>
+                <input
+                  type="number"
+                  value={7835}
+                  disabled
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white opacity-70"
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Bore control port is fixed at 7835 (one shared server per Iran node)
+                </p>
+              </div>
+            </>
+          )}
           
           {tunnel.core === 'frp' && (
             <>
@@ -996,6 +1105,7 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
     rathole_remote_addr: '23333',
     rathole_token: '',
     chisel_control_port: '',  // Empty means auto (listen_port + 10000)
+    wstunnel_control_port: '',
     frp_bind_port: '7000',
     frp_token: '',
     frp_local_ip: '127.0.0.1',
@@ -1007,18 +1117,28 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
   const [backhaulAdvanced, setBackhaulAdvanced] = useState<BackhaulAdvancedState>(createDefaultBackhaulAdvancedState())
   const [showBackhaulAdvanced, setShowBackhaulAdvanced] = useState(false)
 
-  // Auto-populate remote_ip with foreign server IP when GOST is selected
+  // Auto-populate remote_ip: prefer GRE peer_inner when Iran↔Foreign GRE exists
   useEffect(() => {
     if (formData.core === 'gost' && formData.foreign_node_id) {
       const selectedServer = servers.find(s => s.id === formData.foreign_node_id)
-      if (selectedServer?.metadata?.ip_address) {
-        setFormData(prev => ({
-          ...prev,
-          remote_ip: selectedServer.metadata.ip_address
-        }))
-      }
+      const foreignPublic = selectedServer?.metadata?.ip_address
+      if (!foreignPublic) return
+
+      const iranId = formData.iran_node_id || formData.node_id
+      const iranNode = nodes.find(n => n.id === iranId)
+      const grePeers = (iranNode?.metadata?.gre_peers || []) as Array<{
+        remote?: string
+        peer_inner?: string
+        mtu?: number
+        iface?: string
+      }>
+      const gre = grePeers.find(g => g.remote === foreignPublic && g.peer_inner)
+      setFormData(prev => ({
+        ...prev,
+        remote_ip: gre?.peer_inner || foreignPublic
+      }))
     }
-  }, [formData.foreign_node_id, formData.core, servers])
+  }, [formData.foreign_node_id, formData.iran_node_id, formData.node_id, formData.core, servers, nodes])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
@@ -1078,6 +1198,31 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
         spec.control_port = controlPort
         const panelHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost'
         spec.panel_host = panelHost
+      }
+
+      if (formData.core === 'wstunnel') {
+        spec.ports = ports
+        const firstPort = ports[0]
+        spec.listen_port = firstPort
+        spec.remote_port = firstPort
+        const controlPort = formData.wstunnel_control_port
+          ? parseInt(formData.wstunnel_control_port.toString())
+          : firstPort + 10000
+        spec.control_port = controlPort
+        spec.type = formData.type === 'udp' ? 'udp' : 'tcp'
+        spec.local_addr = `127.0.0.1:${firstPort}`
+        tunnelType = formData.type === 'udp' ? 'udp' : 'tcp'
+      }
+
+      if (formData.core === 'bore') {
+        spec.ports = ports
+        const firstPort = ports[0]
+        spec.listen_port = firstPort
+        spec.remote_port = firstPort
+        spec.control_port = 7835
+        spec.type = 'tcp'
+        spec.local_host = '127.0.0.1'
+        tunnelType = 'tcp'
       }
       
       if (formData.core === 'backhaul') {
@@ -1192,7 +1337,9 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
     let newType = formData.type
     if (core === 'rathole' || core === 'chisel') {
       newType = core
-    } else if (core === 'frp') {
+    } else if (core === 'bore') {
+      newType = 'tcp'
+    } else if (core === 'frp' || core === 'wstunnel') {
       // Keep current type if it's tcp or udp, otherwise default to tcp
       newType = (formData.type === 'tcp' || formData.type === 'udp') ? formData.type : 'tcp'
     } else if (core === 'backhaul') {
@@ -1237,7 +1384,7 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
                 value={formData.iran_node_id || formData.node_id}
                 onChange={(e) => setFormData({ ...formData, iran_node_id: e.target.value, node_id: e.target.value })}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white"
-                required={formData.core === 'rathole' || formData.core === 'backhaul' || formData.core === 'frp' || formData.core === 'chisel'}
+                required={formData.core === 'rathole' || formData.core === 'backhaul' || formData.core === 'frp' || formData.core === 'chisel' || formData.core === 'wstunnel' || formData.core === 'bore'}
               >
                 <option value="">{t.tunnels.selectIranNode}</option>
                 {nodes.map((node) => (
@@ -1255,7 +1402,7 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
                 value={formData.foreign_node_id}
                 onChange={(e) => setFormData({ ...formData, foreign_node_id: e.target.value })}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white"
-                required={formData.core === 'rathole' || formData.core === 'backhaul' || formData.core === 'frp' || formData.core === 'chisel'}
+                required={formData.core === 'rathole' || formData.core === 'backhaul' || formData.core === 'frp' || formData.core === 'chisel' || formData.core === 'wstunnel' || formData.core === 'bore'}
               >
                 <option value="">{t.tunnels.selectForeignServer}</option>
                 {servers.map((server) => (
@@ -1282,6 +1429,8 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
                 <option value="backhaul">Backhaul</option>
                 <option value="chisel">Chisel</option>
                 <option value="frp">FRP</option>
+                <option value="wstunnel">Wstunnel</option>
+                <option value="bore">Bore</option>
               </select>
             </div>
             <div>
@@ -1298,16 +1447,18 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
                   }
                 }}
                 className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white"
-                disabled={formData.core === 'chisel'}
+                disabled={formData.core === 'chisel' || formData.core === 'bore'}
               >
                 {formData.core === 'chisel' ? (
                   <option value={formData.core}>{formData.core.charAt(0).toUpperCase() + formData.core.slice(1)}</option>
+                ) : formData.core === 'bore' ? (
+                  <option value="tcp">TCP</option>
                 ) : formData.core === 'rathole' ? (
                   <>
                     <option value="tcp">TCP</option>
                     <option value="ws">WebSocket (WS)</option>
                   </>
-                ) : formData.core === 'frp' ? (
+                ) : formData.core === 'frp' || formData.core === 'wstunnel' ? (
                   <>
                     <option value="tcp">TCP</option>
                     <option value="udp">UDP</option>
@@ -1348,7 +1499,7 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
                   placeholder="127.0.0.1 or [2001:db8::1]"
                 />
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
-                  {t.tunnels.remoteIPDescription}
+                  Target on foreign node. If GRE exists between Iran and Foreign, peer inner IP is preferred automatically (MSS/MTU optimized).
                 </p>
               </div>
               <div>
@@ -1483,6 +1634,85 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
                 />
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
                   Chisel server control port (leave empty for auto: first port + 10000)
+                </p>
+              </div>
+            </>
+          )}
+
+          {formData.core === 'wstunnel' && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Ports
+                </label>
+                <input
+                  type="text"
+                  value={formData.ports}
+                  onChange={(e) =>
+                    setFormData({ ...formData, ports: e.target.value })
+                  }
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white"
+                  placeholder="8080,8081,8082"
+                  required
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Public ports on Iran node (forwarded to same ports on foreign)
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Control Port
+                </label>
+                <input
+                  type="number"
+                  value={formData.wstunnel_control_port}
+                  onChange={(e) =>
+                    setFormData({ ...formData, wstunnel_control_port: e.target.value })
+                  }
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white"
+                  placeholder={`${(parseInt(formData.ports.split(',')[0]?.trim()) || 8080) + 10000} (auto)`}
+                  min="1"
+                  max="65535"
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Wstunnel WebSocket control port on Iran (leave empty for auto: first port + 10000)
+                </p>
+              </div>
+            </>
+          )}
+
+          {formData.core === 'bore' && (
+            <>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Ports
+                </label>
+                <input
+                  type="text"
+                  value={formData.ports}
+                  onChange={(e) =>
+                    setFormData({ ...formData, ports: e.target.value })
+                  }
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white"
+                  placeholder="8080,8081,8082"
+                  required
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Public TCP ports on Iran (forwarded to same ports on foreign)
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
+                  Control Port
+                </label>
+                <input
+                  type="number"
+                  value={7835}
+                  disabled
+                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white opacity-70"
+                />
+                <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">
+                  Bore control port is fixed at 7835. Multiple bore tunnels on one Iran node share one server/secret.
                 </p>
               </div>
             </>
