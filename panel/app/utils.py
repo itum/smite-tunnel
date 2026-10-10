@@ -241,6 +241,12 @@ def resolve_gost_forward_target(
     foreign_public = (foreign_public_ip or "").strip() or None
     iran_public = (iran_public_ip or "").strip() or None
 
+    # Loopback/unspecified addresses are never deliberate forward targets
+    # (they usually come from form defaults). Fall through to GRE/public
+    # resolution so GOST does not forward to the Iran node itself.
+    if explicit in {"127.0.0.1", "localhost", "::1", "0.0.0.0"}:
+        explicit = None
+
     # Keep deliberate custom targets (not the foreign public IP).
     if explicit and explicit != foreign_public:
         # Still annotate if explicit already is a known GRE inner IP.
