@@ -1954,6 +1954,15 @@ class AdapterManager:
         except Exception as e:
             logger.debug(f"MTU optimize for {tunnel_id} skipped: {e}")
 
+        # Auto-open tunnel ports in the host firewall (iptables + UFW).
+        # Idempotent and never raises; without this a strict firewall
+        # (e.g. UFW default-deny) drops tunnel traffic after apply.
+        try:
+            from app.network_optimize import ensure_firewall_ports
+            ensure_firewall_ports(spec)
+        except Exception as e:
+            logger.debug(f"Firewall auto-open for {tunnel_id} skipped: {e}")
+
         adapter.apply(tunnel_id, spec)
         self.active_tunnels[tunnel_id] = adapter
         

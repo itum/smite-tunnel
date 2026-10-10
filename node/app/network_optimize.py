@@ -267,3 +267,218 @@ def pick_gre_forward_ip(target_public_ip: str, gre_peers: Optional[List[Dict[str
         if gre.get("remote") == target_public_ip and gre.get("peer_inner"):
             return gre
     return None
+
+
+# ---------------------------------------------------------------------------
+# Firewall: automatically open tunnel ports (iptables + UFW)
+# ---------------------------------------------------------------------------
+
+# Keys whose values are listen-side (data) ports of a tunnel spec.
+_LISTEN_PORT_KEYS = ("listen_port", "remote_port", "reverse_port", "public_port")
+# Keys whose values are control-plane ports (FRP bind, backhaul/chisel/
+# rathole/wstunnel control, ...). Always TCP.
+_CONTROL_PORT_KEYS = ("bind_port", "control_port", "server_port")
+_MAX_AUTO_PORTS = 64
+
+
+def _valid_port(value: Any) -> Optional[int]:
+    try:
+        port = int(str(value).strip())
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if 1 <= port <= 65535:
+        return port
+    return None
+
+
+def _port_from_mapping(raw: str) -> Optional[int]:
+    """Extract the public/listen side from 'PORT=host:port' style entries."""
+    left = raw.split("=", 1)[0].strip()
+    if ":" in left:
+        left = left.rsplit(":", 1)[-1].strip()
+    return _valid_port(left)
+
+
+def collect_tunnel_ports(spec: Dict[str, Any]) -> Dict[str, List[int]]:
+    """
+    Split a tunnel spec into listen-side ports (need TCP+UDP) and
+    control-plane ports (TCP only). Over-allowing is harmless: ACCEPT
+    rules create no listeners, they just stop the firewall dropping
+    traffic to ports the tunnel actually binds.
+    """
+    listen: set = set()
+    control: set = set()
+
+    raw_ports = spec.get("ports") or []
+    if isinstance(raw_ports, (int, str)):
+        raw_ports = [p.strip() for p in str(raw_ports).split(",")]
+    if isinstance(raw_ports, list):
+        for item in raw_ports:
+            if isinstance(item, dict):
+                for key in ("local", "remote", "listen_port", "public_port"):
+                    port = _valid_port(item.get(key))
+                    if port:
+                        listen.add(port)
+            elif isinstance(item, int):
+                port = _valid_port(item)
+                if port:
+                    listen.add(port)
+            elif isinstance(item, str):
+                port = _port_from_mapping(item)
+                if port:
+                    listen.add(port)
+
+    for key in _LISTEN_PORT_KEYS:
+        port = _valid_port(spec.get(key))
+        if port:
+            listen.add(port)
+    for key in _CONTROL_PORT_KEYS:
+        port = _valid_port(spec.get(key))
+        if port:
+            control.add(port)
+
+    return {
+        "tcp": sorted(listen | control)[:_MAX_AUTO_PORTS],
+        "udp": sorted(listen)[:_MAX_AUTO_PORTS],
+    }
+
+
+def _ufw_active() -> bool:
+    ufw = _which("ufw")
+    if not ufw:
+        return False
+    try:
+        proc = subprocess.run([ufw, "status"], capture_output=True, text=True, timeout=5)
+        return "Status: active" in (proc.stdout or "")
+    except Exception:
+        return False
+
+
+def _ufw_allow(args: List[str]) -> None:
+    ufw = _which("ufw")
+    if not ufw:
+        return
+    try:
+        # Idempotent: ufw skips rules that already exist with the same comment.
+        subprocess.run([ufw, *args], capture_output=True, text=True, timeout=15, check=False)
+    except Exception as e:
+        logger.debug(f"ufw {' '.join(args)} failed: {e}")
+
+
+def _filter_bins() -> List[str]:
+    bins = []
+    for name in ("iptables", "ip6tables"):
+        path = _which(name)
+        if path:
+            bins.append(path)
+    return bins
+
+
+def _user_chain(bin_path: str) -> str:
+    """
+    Chain where ACCEPTs are evaluated before any REJECT. When UFW manages
+    the firewall, ufw-user-input is reached before ufw-reject-input, so an
+    appended ACCEPT there takes effect; a plain appended INPUT rule would
+    never be reached. Without UFW, plain INPUT is correct.
+    """
+    try:
+        proc = subprocess.run(
+            [bin_path, "-t", "filter", "-L", "ufw-user-input", "-n"],
+            capture_output=True, timeout=5,
+        )
+        if proc.returncode == 0:
+            return "ufw-user-input"
+    except Exception:
+        pass
+    return "INPUT"
+
+
+def _accept_ensure(bin_path: str, chain: str, args: Sequence[str]) -> bool:
+    """Idempotent ACCEPT append. True when the rule is present afterwards."""
+    check = [bin_path, "-t", "filter", "-C", chain, *args, "-j", "ACCEPT"]
+    try:
+        if subprocess.run(check, capture_output=True, timeout=5).returncode == 0:
+            return True
+    except Exception:
+        return False
+    cmd = [bin_path, "-t", "filter", "-A", chain, *args, "-j", "ACCEPT"]
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=5, check=False)
+    except Exception as e:
+        logger.debug(f"firewall ACCEPT failed {cmd}: {e}")
+        return False
+    return True
+
+
+def ensure_firewall_ports(
+    spec: Dict[str, Any],
+    extra_tcp_ports: Optional[Sequence[int]] = None,
+    ensure_gre: bool = True,
+) -> Dict[str, Any]:
+    """
+    Open a tunnel's ports in the host firewall automatically.
+
+    - Listen ports → TCP + UDP ACCEPT; control ports → TCP ACCEPT.
+    - Uses ufw-user-input when UFW is active (else INPUT), plus `ufw allow`
+      when the ufw tool exists (covers IPv6 too).
+    - Optionally allows GRE (proto 47 from known peers + inner IPs) so
+      GRE-backed forwards work without manual firewall steps.
+
+    Never raises: every failure is logged and skipped. Safe to call on
+    every tunnel apply / restore; existing rules are detected, not duped.
+    """
+    result: Dict[str, Any] = {"tcp": [], "udp": [], "gre": [], "backends": []}
+    try:
+        ports = collect_tunnel_ports(spec)
+        tcp_ports = list(ports["tcp"])
+        for extra in extra_tcp_ports or []:
+            port = _valid_port(extra)
+            if port and port not in tcp_ports:
+                tcp_ports.append(port)
+        tcp_ports = sorted(tcp_ports)[:_MAX_AUTO_PORTS]
+        udp_ports = ports["udp"]
+        result["tcp"] = tcp_ports
+        result["udp"] = udp_ports
+
+        gre_peers = discover_gre_peers() if ensure_gre else []
+        result["gre"] = [g.get("iface") for g in gre_peers if g.get("iface")]
+
+        if _ufw_active():
+            result["backends"].append("ufw")
+            for port in tcp_ports:
+                _ufw_allow(["allow", f"{port}/tcp", "comment", "smite-tunnel"])
+            for port in udp_ports:
+                _ufw_allow(["allow", f"{port}/udp", "comment", "smite-tunnel"])
+            for gre in gre_peers:
+                remote = (gre.get("remote") or "").strip()
+                peer_inner = (gre.get("peer_inner") or "").strip()
+                if remote:
+                    _ufw_allow(["allow", "proto", "gre", "from", remote, "comment", "smite-gre"])
+                if peer_inner:
+                    _ufw_allow(["allow", "from", peer_inner, "comment", "smite-gre"])
+
+        bins = _filter_bins()
+        if bins:
+            result["backends"].append("iptables")
+            for bin_path in bins:
+                chain = _user_chain(bin_path)
+                is_v6 = "ip6tables" in bin_path
+                for port in tcp_ports:
+                    _accept_ensure(bin_path, chain, ["-p", "tcp", "--dport", str(port)])
+                for port in udp_ports:
+                    _accept_ensure(bin_path, chain, ["-p", "udp", "--dport", str(port)])
+                for gre in gre_peers:
+                    remote = (gre.get("remote") or "").strip()
+                    peer_inner = (gre.get("peer_inner") or "").strip()
+                    if remote and not is_v6:
+                        _accept_ensure(bin_path, chain, ["-p", "47", "-s", remote])
+                    if peer_inner:
+                        _accept_ensure(bin_path, chain, ["-s", peer_inner])
+
+        logger.info(
+            f"Firewall auto-open: tcp={tcp_ports} udp={udp_ports} "
+            f"gre={result['gre']} via={result['backends'] or 'none'}"
+        )
+    except Exception as e:
+        logger.debug(f"ensure_firewall_ports skipped: {e}")
+    return result
