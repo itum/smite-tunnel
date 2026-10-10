@@ -31,6 +31,47 @@ class GreEnsure(BaseModel):
     mtu: int = 1472
 
 
+class MtuProbeRequest(BaseModel):
+    target: str
+
+
+class BenchListen(BaseModel):
+    port: int
+
+
+class BenchMeasure(BaseModel):
+    host: str
+    port: int
+    nbytes: int = 2 * 1024 * 1024
+
+
+class BenchGost(BaseModel):
+    listen_port: int
+    target_host: str
+    target_port: int
+    nbytes: int = 4 * 1024 * 1024
+
+
+class BenchFrps(BaseModel):
+    bind_port: int
+    token: str
+
+
+class BenchFrpc(BaseModel):
+    server_addr: str
+    server_port: int
+    token: str
+    local_port: int
+    remote_port: int
+
+
+class TunnelLiveRequest(BaseModel):
+    tunnel_id: str
+    core: str = "gost"
+    ports: list = []
+    control_port: Optional[int] = None
+
+
 @router.post("/tunnels/apply")
 async def apply_tunnel(data: TunnelApply, request: Request):
     """Apply tunnel configuration"""
@@ -75,6 +116,22 @@ async def get_tunnel_status(tunnel_id: str, request: Request):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post("/tunnels/live")
+async def tunnel_live(data: TunnelLiveRequest, request: Request):
+    """Real listen/process check for each tunnel port. Not a cached DB flag."""
+    from app.tunnel_live import live_status, normalize_ports
+
+    adapter_manager = request.app.state.adapter_manager
+    ports = normalize_ports(data.ports or [])
+    return live_status(
+        tunnel_id=data.tunnel_id,
+        core=(data.core or "").lower(),
+        ports=ports,
+        control_port=data.control_port,
+        adapter_manager=adapter_manager,
+    )
+
+
 @router.get("/status")
 async def get_status(request: Request):
     """Get node status"""
@@ -108,6 +165,67 @@ async def ensure_gre_tunnel(data: GreEnsure):
     except Exception as e:
         logger.error(f"GRE ensure failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/network/mtu-probe")
+async def probe_path_mtu(data: MtuProbeRequest):
+    """Measure path MTU to a peer. Does not change GRE or tunnels."""
+    try:
+        from app.gre_setup import discover_underlay_mtu
+        return discover_underlay_mtu(data.target)
+    except Exception as e:
+        logger.error(f"MTU probe failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/bench/listen")
+async def bench_listen(data: BenchListen):
+    from app.path_bench import start_listener
+    return start_listener(data.port)
+
+
+@router.post("/bench/stop")
+async def bench_stop(data: BenchListen):
+    from app.path_bench import stop_listener
+    return stop_listener(data.port)
+
+
+@router.post("/bench/stop-all")
+async def bench_stop_all():
+    from app.path_bench import stop_all
+    stop_all()
+    return {"ok": True}
+
+
+@router.post("/bench/measure")
+async def bench_measure(data: BenchMeasure):
+    from app.path_bench import measure
+    return measure(data.host, data.port, data.nbytes)
+
+
+@router.post("/bench/gost")
+async def bench_gost(data: BenchGost):
+    from app.path_bench import measure_gost
+    return measure_gost(data.listen_port, data.target_host, data.target_port, data.nbytes)
+
+
+@router.post("/bench/frps")
+async def bench_frps(data: BenchFrps):
+    from app.path_bench import start_frps
+    return start_frps(data.bind_port, data.token)
+
+
+@router.post("/bench/frpc")
+async def bench_frpc(data: BenchFrpc):
+    from app.path_bench import start_frpc
+    return start_frpc(data.server_addr, data.server_port, data.token, data.local_port, data.remote_port)
+
+
+@router.post("/bench/stop-proc")
+async def bench_stop_proc(data: dict):
+    from app.path_bench import stop_named
+    stop_named(str(data.get("name") or ""))
+    return {"ok": True}
 
 
 @router.get("/network/gre")

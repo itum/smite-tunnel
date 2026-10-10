@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react'
 import api from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { useLanguage } from '../contexts/LanguageContext'
 
 interface FrpSettings {
@@ -50,7 +51,7 @@ const Settings = () => {
       setSettings(response.data)
     } catch (error) {
       console.error('Failed to load settings:', error)
-      setMessage({ type: 'error', text: t.settings.failedToLoad })
+      setMessage({ type: 'error', text: apiErrorMessage(error, t.settings.failedToLoad) })
     } finally {
       setLoading(false)
     }
@@ -65,7 +66,7 @@ const Settings = () => {
       await loadSettings()
     } catch (error) {
       console.error('Failed to save settings:', error)
-      setMessage({ type: 'error', text: t.settings.failedToSave })
+      setMessage({ type: 'error', text: apiErrorMessage(error, t.settings.failedToSave) })
     } finally {
       setSaving(false)
     }

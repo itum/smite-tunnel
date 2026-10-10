@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+import socket
 import subprocess
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -145,6 +146,127 @@ WantedBy=multi-user.target
         return False
 
 
+def _icmp_checksum(data: bytes) -> int:
+    if len(data) % 2:
+        data += b"\x00"
+    total = 0
+    for i in range(0, len(data), 2):
+        total += (data[i] << 8) + data[i + 1]
+        total = (total & 0xFFFF) + (total >> 16)
+    return (~total) & 0xFFFF
+
+
+def ping_df(host: str, payload: int, timeout: float = 1.0) -> str:
+    """
+    One DF ICMP echo. Returns ok, too_big, or fail.
+    Ignores ICMP that is not this probe. Does not change any interface.
+    """
+    import struct
+    import time
+
+    payload = max(0, int(payload))
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_RAW, socket.IPPROTO_ICMP)
+    except OSError as e:
+        return f"fail:{e}"
+    try:
+        # IP_MTU_DISCOVER / IP_PMTUDISC_DO — do not fragment.
+        sock.setsockopt(socket.IPPROTO_IP, 10, 2)
+        sock.settimeout(0.3)
+        ident = os.getpid() & 0xFFFF
+        seq = (payload ^ int(time.time() * 1000)) & 0xFFFF or 1
+        data = b"S" * payload
+        header = struct.pack("!BBHHH", 8, 0, 0, ident, seq)
+        header = struct.pack("!BBHHH", 8, 0, _icmp_checksum(header + data), ident, seq)
+        try:
+            sock.sendto(header + data, (host, 0))
+        except OSError as e:
+            if getattr(e, "errno", None) in (90, 40):
+                return "too_big"
+            return "fail"
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            try:
+                pkt, _addr = sock.recvfrom(4096)
+            except socket.timeout:
+                continue
+            if not pkt:
+                continue
+            if pkt[0] in (0, 3, 8):
+                icmp = pkt
+            else:
+                ihl = (pkt[0] & 0x0F) * 4
+                icmp = pkt[ihl:] if len(pkt) > ihl else b""
+            if len(icmp) < 8:
+                continue
+            if icmp[0] == 3 and icmp[1] == 4:
+                return "too_big"
+            if icmp[0] != 0:
+                continue
+            rid, rseq = struct.unpack("!HH", icmp[4:8])
+            if rid == ident and rseq == seq:
+                return "ok"
+        return "fail"
+    finally:
+        sock.close()
+
+
+def _classify_size(host: str, payload: int) -> str:
+    """ok if the size fits at least once. too_big only on an explicit DF refusal."""
+    saw_too_big = False
+    for _ in range(2):
+        result = ping_df(host, payload)
+        if result == "ok":
+            return "ok"
+        if result == "too_big":
+            saw_too_big = True
+    return "too_big" if saw_too_big else "fail"
+
+
+def discover_underlay_mtu(host: str) -> Dict[str, Any]:
+    """
+    Largest IPv4 packet (DF) that reaches host.
+    ICMP payload + 28 = IP MTU. Does not modify GRE or tunnels.
+    """
+    host = (host or "").strip()
+    if not host:
+        return {"ok": False, "error": "Probe target is empty"}
+
+    if _classify_size(host, 548) != "ok":
+        return {"ok": False, "error": f"No ICMP reply from {host}. MTU was not changed."}
+
+    # Common case: a 1500-byte path. One success is enough; do not shrink on loss.
+    if _classify_size(host, 1472) == "ok":
+        return {"ok": True, "host": host, "underlay_mtu": 1500, "payload": 1472, "steps": 1}
+
+    lo, hi = 548, 1471
+    best = 548
+    steps = 1
+    while lo <= hi and steps < 14:
+        mid = (lo + hi) // 2
+        steps += 1
+        result = _classify_size(host, mid)
+        if result == "ok":
+            best = mid
+            lo = mid + 1
+        elif result == "too_big":
+            hi = mid - 1
+        else:
+            # Loss is not a smaller MTU. Try the next smaller candidate once.
+            hi = mid - 1
+
+    if _classify_size(host, best) != "ok":
+        return {"ok": False, "error": f"Probe to {host} was unstable. MTU was not changed."}
+
+    return {
+        "ok": True,
+        "host": host,
+        "underlay_mtu": best + 28,
+        "payload": best,
+        "steps": steps,
+    }
+
+
 def ensure_gre(
     remote_public_ip: str,
     role: str = "iran",
@@ -180,20 +302,17 @@ def ensure_gre(
     _run(["modprobe", "ip_gre"])
     _run(["modprobe", "gre"])
 
-    # Remove stale iface if present
-    _run(["ip", "link", "del", iface])
-
-    code, _, err = _run(
-        [
-            "ip", "tunnel", "add", iface,
-            "mode", "gre",
-            "remote", remote_public_ip,
-            "local", local_public,
-            "ttl", "255",
-        ]
-    )
-    if code != 0:
-        # tunnel might already exist under different params
+    code, link_out, _ = _run(["ip", "-d", "link", "show", iface])
+    already = code == 0 and remote_public_ip in (link_out or "")
+    if already:
+        # Same GRE peer: only adjust MTU. Do not delete the tunnel.
+        code, _, err = _run(["ip", "link", "set", iface, "mtu", str(mtu), "up"])
+        if code != 0:
+            raise RuntimeError(f"ip link set mtu failed: {err.strip()}")
+        code, _, err = _run(["ip", "addr", "replace", f"{li}/{prefixlen}", "dev", iface])
+        if code != 0:
+            raise RuntimeError(f"ip addr replace failed: {err.strip()}")
+    else:
         _run(["ip", "link", "del", iface])
         code, _, err = _run(
             [
@@ -205,15 +324,26 @@ def ensure_gre(
             ]
         )
         if code != 0:
-            raise RuntimeError(f"ip tunnel add failed: {err.strip()}")
+            _run(["ip", "link", "del", iface])
+            code, _, err = _run(
+                [
+                    "ip", "tunnel", "add", iface,
+                    "mode", "gre",
+                    "remote", remote_public_ip,
+                    "local", local_public,
+                    "ttl", "255",
+                ]
+            )
+            if code != 0:
+                raise RuntimeError(f"ip tunnel add failed: {err.strip()}")
 
-    code, _, err = _run(["ip", "link", "set", iface, "mtu", str(mtu), "up"])
-    if code != 0:
-        raise RuntimeError(f"ip link set failed: {err.strip()}")
+        code, _, err = _run(["ip", "link", "set", iface, "mtu", str(mtu), "up"])
+        if code != 0:
+            raise RuntimeError(f"ip link set failed: {err.strip()}")
 
-    code, _, err = _run(["ip", "addr", "replace", f"{li}/{prefixlen}", "dev", iface])
-    if code != 0:
-        raise RuntimeError(f"ip addr replace failed: {err.strip()}")
+        code, _, err = _run(["ip", "addr", "replace", f"{li}/{prefixlen}", "dev", iface])
+        if code != 0:
+            raise RuntimeError(f"ip addr replace failed: {err.strip()}")
 
     # Loosen rp_filter on GRE for asymmetric paths
     for path in (

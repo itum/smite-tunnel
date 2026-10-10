@@ -5,6 +5,7 @@ from sqlalchemy import select
 from typing import List
 from datetime import datetime
 from pydantic import BaseModel
+import asyncio
 import httpx
 import logging
 
@@ -244,7 +245,42 @@ class GreSetupRequest(BaseModel):
     foreign_node_id: str | None = None
     network: str = "172.17.1.0/30"
     mtu: int = 1472
-    iface: str = "smite-gre"
+    iface: str | None = None
+
+
+def _pick_nodes(all_nodes, iran_id, foreign_id):
+    iran = next((n for n in all_nodes if n.id == iran_id), None) if iran_id else None
+    foreign = next((n for n in all_nodes if n.id == foreign_id), None) if foreign_id else None
+    if not iran:
+        iran = next((n for n in all_nodes if (n.node_metadata or {}).get("role") == "iran"), None)
+    if not foreign:
+        foreign = next((n for n in all_nodes if (n.node_metadata or {}).get("role") == "foreign"), None)
+    return iran, foreign
+
+
+@router.get("/gre/status")
+async def gre_status(db: AsyncSession = Depends(get_db)):
+    """Current GRE settings taken from node metadata. MTU lives on the GRE interface."""
+    from app.utils import mss_for_mtu
+
+    result = await db.execute(select(Node))
+    iran, foreign = _pick_nodes(result.scalars().all(), None, None)
+    iran_peers = ((iran.node_metadata or {}).get("gre_peers") or []) if iran else []
+    peer = iran_peers[0] if iran_peers else {}
+    mtu = int(peer.get("mtu") or 1472)
+    return {
+        "configured": bool(peer),
+        "iface": peer.get("iface") or "smite-gre",
+        "network": "172.17.1.0/30",
+        "mtu": mtu,
+        "mss": mss_for_mtu(mtu),
+        "iran_inner": peer.get("local_inner"),
+        "foreign_inner": peer.get("peer_inner"),
+        "iran_public": (iran.node_metadata or {}).get("ip_address") if iran else None,
+        "foreign_public": (foreign.node_metadata or {}).get("ip_address") if foreign else None,
+        "iran_node_id": iran.id if iran else None,
+        "foreign_node_id": foreign.id if foreign else None,
+    }
 
 
 @router.post("/gre/setup")
@@ -256,25 +292,15 @@ async def setup_gre_between_nodes(body: GreSetupRequest | None = None, db: Async
     import ipaddress
     from sqlalchemy.orm.attributes import flag_modified
 
+    from app.utils import mss_for_mtu
+    from app.models import Tunnel
+
     body = body or GreSetupRequest()
+    if body.mtu < 1280 or body.mtu > 1500:
+        raise HTTPException(status_code=400, detail="GRE MTU must be between 1280 and 1500")
     result = await db.execute(select(Node))
     all_nodes = result.scalars().all()
-    iran = None
-    foreign = None
-    if body.iran_node_id:
-        iran = next((n for n in all_nodes if n.id == body.iran_node_id), None)
-    if body.foreign_node_id:
-        foreign = next((n for n in all_nodes if n.id == body.foreign_node_id), None)
-    if not iran:
-        iran = next(
-            (n for n in all_nodes if (n.node_metadata or {}).get("role") == "iran"),
-            None,
-        )
-    if not foreign:
-        foreign = next(
-            (n for n in all_nodes if (n.node_metadata or {}).get("role") == "foreign"),
-            None,
-        )
+    iran, foreign = _pick_nodes(all_nodes, body.iran_node_id, body.foreign_node_id)
     if not iran or not foreign:
         raise HTTPException(
             status_code=400,
@@ -291,6 +317,9 @@ async def setup_gre_between_nodes(body: GreSetupRequest | None = None, db: Async
     if len(hosts) < 2:
         raise HTTPException(status_code=400, detail=f"Invalid GRE network {body.network}")
     foreign_inner, iran_inner = hosts[0], hosts[1]
+    existing_iface = (((iran.node_metadata or {}).get("gre_peers") or [{}])[0] or {}).get("iface")
+    iface = (body.iface or existing_iface or "smite-gre").strip()
+    mss = mss_for_mtu(body.mtu)
 
     client = NodeClient()
     iran_payload = {
@@ -300,7 +329,7 @@ async def setup_gre_between_nodes(body: GreSetupRequest | None = None, db: Async
         "local_inner": iran_inner,
         "peer_inner": foreign_inner,
         "network": str(net),
-        "iface": body.iface,
+        "iface": iface,
         "mtu": body.mtu,
     }
     foreign_payload = {
@@ -310,7 +339,7 @@ async def setup_gre_between_nodes(body: GreSetupRequest | None = None, db: Async
         "local_inner": foreign_inner,
         "peer_inner": iran_inner,
         "network": str(net),
-        "iface": body.iface,
+        "iface": iface,
         "mtu": body.mtu,
     }
 
@@ -326,7 +355,7 @@ async def setup_gre_between_nodes(body: GreSetupRequest | None = None, db: Async
         gre = (resp or {}).get("gre") or {}
         md["gre_peers"] = [
             {
-                "iface": gre.get("iface") or body.iface,
+                "iface": gre.get("iface") or iface,
                 "local": gre.get("local_public") or md.get("ip_address"),
                 "remote": peer_public,
                 "local_inner": gre.get("local_inner") or local_inner,
@@ -336,16 +365,180 @@ async def setup_gre_between_nodes(body: GreSetupRequest | None = None, db: Async
         ]
         node.node_metadata = md
         flag_modified(node, "node_metadata")
+
+    # Tunnels do not store their own MTU. They inherit MSS from the GRE MTU.
+    tunnels = (await db.execute(select(Tunnel))).scalars().all()
+    for tunnel in tunnels:
+        spec = dict(tunnel.spec or {})
+        if spec.get("forward_via") == "gre" or tunnel.core in {
+            "gost", "frp", "bore", "chisel", "wstunnel", "rathole", "backhaul"
+        }:
+            spec["forward_mtu"] = body.mtu
+            spec["tcp_mss"] = mss
+            tunnel.spec = spec
+            flag_modified(tunnel, "spec")
     await db.commit()
 
     ok = (iran_resp or {}).get("status") == "ok" and (foreign_resp or {}).get("status") == "ok"
     return {
         "status": "ok" if ok else "partial",
         "network": str(net),
+        "mtu": body.mtu,
+        "mss": mss,
+        "iface": iface,
         "iran": {"node_id": iran.id, "inner": iran_inner, "response": iran_resp},
         "foreign": {"node_id": foreign.id, "inner": foreign_inner, "response": foreign_resp},
-        "message": "GRE configured; tunnels will prefer GRE automatically",
+        "message": f"GRE MTU set to {body.mtu}. Tunnels use TCP MSS {mss}.",
     }
+
+
+@router.post("/gre/probe")
+async def probe_gre_mtu(db: AsyncSession = Depends(get_db)):
+    """
+    Measure the path between Iran and the foreign server and suggest a GRE MTU.
+    Does not change the GRE interface or any tunnel.
+    """
+    from app.utils import mss_for_mtu
+
+    result = await db.execute(select(Node))
+    iran, foreign = _pick_nodes(result.scalars().all(), None, None)
+    if not iran or not foreign:
+        raise HTTPException(status_code=400, detail="Need one Iran node and one foreign node before an MTU test")
+    iran_ip = (iran.node_metadata or {}).get("ip_address")
+    foreign_ip = (foreign.node_metadata or {}).get("ip_address")
+    if not iran_ip or not foreign_ip:
+        raise HTTPException(status_code=400, detail="Both nodes must have a public IP before an MTU test")
+
+    client = NodeClient()
+    # Sequential: both nodes use raw ICMP, and overlapping probes steal each other's replies.
+    iran_resp = await client.send_to_node(iran.id, "/api/agent/network/mtu-probe", {"target": foreign_ip})
+    foreign_resp = await client.send_to_node(foreign.id, "/api/agent/network/mtu-probe", {"target": iran_ip})
+
+    underlays = []
+    directions = []
+    for label, public_ip, resp in (
+        ("iran_to_foreign", foreign_ip, iran_resp),
+        ("foreign_to_iran", iran_ip, foreign_resp),
+    ):
+        if isinstance(resp, dict) and resp.get("ok") and resp.get("underlay_mtu"):
+            underlays.append(int(resp["underlay_mtu"]))
+            directions.append({"direction": label, "target": public_ip, "underlay_mtu": int(resp["underlay_mtu"])})
+        else:
+            directions.append({
+                "direction": label,
+                "target": public_ip,
+                "ok": False,
+                "error": (resp or {}).get("error") or (resp or {}).get("message") or "Probe failed",
+            })
+
+    if not underlays:
+        raise HTTPException(
+            status_code=502,
+            detail="MTU test failed in both directions. Current GRE MTU was not changed.",
+        )
+
+    underlay = min(underlays)
+    # Outer IPv4 (20) + GRE (8) = 28, matching the panel default of 1472 on a 1500 path.
+    recommended = max(1280, min(1472, underlay - 28))
+    mss = mss_for_mtu(recommended)
+    return {
+        "status": "ok",
+        "changed": False,
+        "underlay_mtu": underlay,
+        "recommended_mtu": recommended,
+        "mss": mss,
+        "directions": directions,
+        "message": (
+            f"Best GRE MTU between these servers is {recommended} "
+            f"(path MTU {underlay}, tunnel MSS {mss}). Nothing was changed."
+        ),
+    }
+
+
+class PathBenchRequest(BaseModel):
+    iran_node_id: str | None = None
+    foreign_node_id: str | None = None
+
+
+@router.post("/path-bench/start")
+async def path_bench_start(body: PathBenchRequest | None = None, db: AsyncSession = Depends(get_db)):
+    """Start a background path test. Returns job_id. Concurrent starts get HTTP 409."""
+    from app.path_bench_jobs import active_job, start_job
+
+    body = body or PathBenchRequest()
+    result = await db.execute(select(Node))
+    iran, foreign = _pick_nodes(result.scalars().all(), body.iran_node_id, body.foreign_node_id)
+    if not iran or not foreign:
+        raise HTTPException(status_code=400, detail="Select one Iran node and one foreign node")
+    if not (iran.node_metadata or {}).get("ip_address") or not (foreign.node_metadata or {}).get("ip_address"):
+        raise HTTPException(status_code=400, detail="Both nodes need a public IP before a path test")
+
+    current = active_job()
+    if current and current.get("state") == "running":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A path test is already running (job {current['id'][:8]}). "
+                "Wait for it to finish, or close the other tab that started it."
+            ),
+        )
+    try:
+        started = await start_job(iran, foreign, {"iran": body.iran_node_id, "foreign": body.foreign_node_id})
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"status": "started", **started}
+
+
+@router.get("/path-bench/jobs/{job_id}")
+async def path_bench_job(job_id: str):
+    from app.path_bench_jobs import get_job
+
+    job = get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Path test job not found")
+    return {
+        "id": job["id"],
+        "state": job["state"],
+        "logs": job["logs"],
+        "error": job.get("error"),
+        "result": job.get("result"),
+    }
+
+
+@router.get("/path-bench/active")
+async def path_bench_active():
+    from app.path_bench_jobs import active_job
+
+    job = active_job()
+    if not job:
+        return {"active": False}
+    return {
+        "active": job.get("state") == "running",
+        "id": job["id"],
+        "state": job["state"],
+        "logs": job["logs"],
+        "error": job.get("error"),
+        "result": job.get("result"),
+    }
+
+
+@router.post("/path-bench")
+async def path_bench_compat(body: PathBenchRequest | None = None, db: AsyncSession = Depends(get_db)):
+    """Compatibility: start job and wait briefly — prefer /path-bench/start + polling."""
+    from app.path_bench_jobs import get_job
+
+    started = await path_bench_start(body, db)
+    job_id = started["job_id"]
+    for _ in range(120):
+        await asyncio.sleep(0.5)
+        job = get_job(job_id)
+        if not job:
+            break
+        if job["state"] == "done":
+            return job["result"]
+        if job["state"] == "error":
+            raise HTTPException(status_code=502, detail=job.get("error") or "Path test failed")
+    raise HTTPException(status_code=504, detail="Path test timed out. Check job logs.")
 
 
 @router.get("/{node_id}", response_model=NodeResponse)

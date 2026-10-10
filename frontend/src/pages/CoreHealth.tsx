@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react'
 import { Activity, RefreshCw, Clock, CheckCircle2, XCircle, AlertCircle, Settings } from 'lucide-react'
 import api from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { useLanguage } from '../contexts/LanguageContext'
 
 interface CoreHealth {
@@ -67,7 +68,7 @@ const CoreHealth = () => {
       await fetchData()
     } catch (error) {
       console.error(`Failed to reset ${core}:`, error)
-      alert(`Failed to reset ${core}`)
+      alert(apiErrorMessage(error, `Failed to reset ${core}`))
     } finally {
       setUpdating(null)
     }
@@ -80,7 +81,7 @@ const CoreHealth = () => {
       await fetchData()
     } catch (error) {
       console.error(`Failed to update config for ${core}:`, error)
-      alert(`Failed to update config`)
+      alert(apiErrorMessage(error, 'Failed to update config'))
     } finally {
       setUpdating(null)
     }

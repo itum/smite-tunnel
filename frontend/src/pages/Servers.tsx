@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Plus, Copy, Trash2, CheckCircle, XCircle, AlertCircle } from 'lucide-react'
 import api from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { useLanguage } from '../contexts/LanguageContext'
 
 interface Server {
@@ -75,8 +76,7 @@ const Servers = () => {
       setCertContent(text)
     } catch (error: any) {
       console.error('Failed to fetch CA:', error)
-      const errorMessage = error.response?.data?.detail || error.message || 'Failed to fetch CA certificate'
-      alert(`Failed to fetch CA certificate: ${errorMessage}`)
+      alert(apiErrorMessage(error, 'Failed to fetch CA certificate'))
       setShowCertModal(false)
     } finally {
       setCertLoading(false)
@@ -106,7 +106,7 @@ const Servers = () => {
       fetchServers()
     } catch (error) {
       console.error('Failed to delete server:', error)
-      alert('Failed to delete server')
+      alert(apiErrorMessage(error, 'Failed to delete server'))
     }
   }
 
@@ -314,7 +314,7 @@ const AddServerModal = ({ onClose, onSuccess }: AddServerModalProps) => {
       onSuccess()
     } catch (error) {
       console.error('Failed to add server:', error)
-      alert('Failed to add server')
+      alert(apiErrorMessage(error, 'Failed to add server'))
     }
   }
 

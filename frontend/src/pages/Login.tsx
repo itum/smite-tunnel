@@ -4,6 +4,7 @@ import { LogIn, Loader2, Shield } from 'lucide-react'
 import { useAuth } from '../contexts/AuthContext'
 import { useLanguage } from '../contexts/LanguageContext'
 import api from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import SmiteLogoDark from '../assets/SmiteD.png'
 import SmiteLogoLight from '../assets/SmiteL.png'
 
@@ -62,7 +63,7 @@ const Login = () => {
       login(response.data.access_token, response.data.username)
       navigate('/dashboard')
     } catch (err: any) {
-      setError(err.response?.data?.detail || t.login.checkCredentials)
+      setError(apiErrorMessage(err, t.login.checkCredentials))
     } finally {
       setLoading(false)
     }

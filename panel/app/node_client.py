@@ -28,39 +28,61 @@ class NodeClient:
                 return setting.value
         return None
     
+    def _candidate_addresses(self, node: Node) -> list[str]:
+        """Ordered list of HTTP bases to try for this node (FRP, public, GRE)."""
+        md = node.node_metadata or {}
+        addrs: list[str] = []
+        api_port = int(md.get("api_port") or 8888)
+
+        # Prefer FRP reverse control plane when configured.
+        frp_remote_port = md.get("frp_remote_port")
+        if frp_remote_port:
+            try:
+                from app.frp_comm_manager import frp_comm_manager
+                if frp_comm_manager.is_running():
+                    addrs.append(f"http://127.0.0.1:{int(frp_remote_port)}")
+            except Exception:
+                pass
+
+        primary = md.get("api_address") or ""
+        if primary and not str(primary).startswith("http"):
+            primary = f"http://{primary}"
+        if primary:
+            addrs.append(str(primary).rstrip("/"))
+
+        public_ip = (md.get("ip_address") or "").strip()
+        if public_ip:
+            addrs.append(f"http://{public_ip}:{api_port}")
+
+        # GRE inner IP — works when public path is blocked but GRE is up.
+        for peer in md.get("gre_peers") or []:
+            inner = (peer.get("local_inner") or "").strip()
+            if inner:
+                addrs.append(f"http://{inner}:{api_port}")
+
+        # Dedupe preserve order
+        seen = set()
+        out = []
+        for a in addrs:
+            key = a.rstrip("/")
+            if key not in seen:
+                seen.add(key)
+                out.append(key)
+        if not out:
+            out.append("http://localhost:8888")
+        return out
+
     async def _get_node_address(self, node: Node) -> Tuple[str, bool]:
         """
-        Get node address (direct or via FRP)
+        Get preferred node address (direct or via FRP)
         Returns: (address, using_frp)
         """
-        frp_settings = await self._get_frp_settings()
-        
-        if frp_settings and frp_settings.get("enabled"):
-            frp_remote_port = node.node_metadata.get("frp_remote_port") if node.node_metadata else None
-            if frp_remote_port:
-                # Verify FRP server is running before using FRP
-                from app.frp_comm_manager import frp_comm_manager
-                if not frp_comm_manager.is_running():
-                    logger.warning(f"[HTTP] FRP enabled but FRP server not running, falling back to HTTP for node {node.id}")
-                    # Fall through to HTTP
-                else:
-                    # Use FRP - the server is running, tunnel should be available
-                    # Note: If connection fails, retry logic will handle it
-                    logger.info(f"[FRP] Using FRP tunnel to communicate with node {node.id} (remote_port={frp_remote_port})")
-                    return (f"http://127.0.0.1:{frp_remote_port}", True)
-            else:
-                # FRP is enabled but node hasn't reported its remote port yet (during initial setup)
-                logger.warning(f"[HTTP] FRP enabled but node {node.id} has no frp_remote_port yet, temporarily using HTTP")
-                logger.warning(f"[HTTP] This should only happen during node registration. After FRP setup, all communication will use FRP.")
-        
-        # FRP is not enabled or not available - use HTTP
-        node_address = node.node_metadata.get("api_address", f"http://localhost:8888") if node.node_metadata else f"http://localhost:8888"
-        if not node_address.startswith("http"):
-            node_address = f"http://{node_address}"
-        logger.info(f"[HTTP] Using direct HTTP to communicate with node {node.id} at {node_address}")
-        return (node_address, False)
+        candidates = self._candidate_addresses(node)
+        using_frp = candidates[0].startswith("http://127.0.0.1:")
+        logger.info(f"[HTTP] Using {'FRP' if using_frp else 'HTTP'} for node {node.id} at {candidates[0]}")
+        return (candidates[0], using_frp)
     
-    async def send_to_node(self, node_id: str, endpoint: str, data: Dict[str, Any]) -> Dict[str, Any]:
+    async def send_to_node(self, node_id: str, endpoint: str, data: Dict[str, Any], timeout: float | None = None) -> Dict[str, Any]:
         """
         Send request to node via HTTPS or FRP
         """
@@ -71,55 +93,53 @@ class NodeClient:
             if not node:
                 return {"status": "error", "message": f"Node {node_id} not found"}
             
-            node_address, using_frp = await self._get_node_address(node)
-            url = f"{node_address.rstrip('/')}{endpoint}"
-            
-            comm_type = "FRP" if using_frp else "HTTP"
-            logger.debug(f"[{comm_type}] Sending request to node {node_id}: {endpoint}")
-            
-            try:
-                # Retry logic for FRP connections which may need a moment to stabilize
-                max_retries = 5 if using_frp else 1
-                last_error = None
-                
+            candidates = self._candidate_addresses(node)
+            last_error = None
+
+            for base in candidates:
+                using_frp = base.startswith("http://127.0.0.1:")
+                url = f"{base.rstrip('/')}{endpoint}"
+                max_retries = 3 if using_frp else 1
                 for attempt in range(max_retries):
                     try:
-                        # For FRP, use a new connection each time to avoid connection reuse issues
                         if using_frp and attempt > 0:
-                            await asyncio.sleep(2.0)  # Longer delay for FRP retries
-                            logger.info(f"[FRP] Retry {attempt + 1}/{max_retries} for node {node_id} via FRP tunnel")
-                        
+                            await asyncio.sleep(1.0)
                         async with httpx.AsyncClient(
-                            timeout=self.timeout, 
+                            timeout=httpx.Timeout(timeout) if timeout else self.timeout,
                             verify=False,
-                            limits=httpx.Limits(max_keepalive_connections=0 if using_frp else 5)  # Disable keep-alive for FRP
+                            limits=httpx.Limits(max_keepalive_connections=0 if using_frp else 5),
                         ) as client:
                             response = await client.post(url, json=data)
                             response.raise_for_status()
+                            if base != candidates[0]:
+                                logger.info(f"Reached node {node_id} via fallback {base}")
                             return response.json()
+                    except httpx.HTTPStatusError as e:
+                        try:
+                            error_detail = e.response.json().get("detail", str(e))
+                        except Exception:
+                            error_detail = str(e)
+                        return {
+                            "status": "error",
+                            "message": f"Node error (HTTP {e.response.status_code}): {error_detail}",
+                        }
                     except httpx.RequestError as e:
                         last_error = e
                         if attempt < max_retries - 1:
-                            if not using_frp:
-                                await asyncio.sleep(0.5)
                             continue
-                        else:
-                            error_msg = f"Network error: {str(e)}"
-                            if using_frp:
-                                remote_port = url.split(":")[-1].split("/")[0] if ":" in url else "unknown"
-                                error_msg += f" (FRP tunnel connection failed after {max_retries} attempts. The panel may not be able to reach FRP server on 127.0.0.1:{remote_port}. Check if panel and FRP server are in the same network namespace, or check FRP server logs.)"
-                            return {"status": "error", "message": error_msg}
-                
-                # Should not reach here, but just in case
-                return {"status": "error", "message": f"Network error: {str(last_error)}"}
-            except httpx.HTTPStatusError as e:
-                try:
-                    error_detail = e.response.json().get("detail", str(e))
-                except:
-                    error_detail = str(e)
-                return {"status": "error", "message": f"Node error (HTTP {e.response.status_code}): {error_detail}"}
-            except Exception as e:
-                return {"status": "error", "message": f"Error: {str(e)}"}
+                        logger.warning(f"Node {node_id} unreachable at {base}: {e}")
+                        break
+                    except Exception as e:
+                        last_error = e
+                        break
+
+            return {
+                "status": "error",
+                "message": (
+                    f"Network error: foreign/iran agent unreachable "
+                    f"(tried {', '.join(candidates)}). Last error: {last_error}"
+                ),
+            }
     
     async def get_tunnel_status(self, node_id: str, tunnel_id: str = "") -> Dict[str, Any]:
         """Get tunnel status from node"""

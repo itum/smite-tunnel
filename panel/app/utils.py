@@ -180,6 +180,41 @@ def generate_bore_secret(length: int = 24) -> str:
     return generate_token(length)
 
 
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def humanize_error(message: Optional[str]) -> Optional[str]:
+    """Turn raw node/core logs into a short message the panel can show."""
+    if not message:
+        return message
+    text = _ANSI_RE.sub("", str(message))
+    text = text.replace("\x1b", "")
+    text = re.sub(r"\s+", " ", text).strip()
+
+    port = None
+    bind = re.search(r"(?:0\.0\.0\.0|\[::\]|127\.0\.0\.1):(\d{2,5})", text)
+    if bind:
+        port = bind.group(1)
+
+    busy = re.search(r"address already in use|address in use|os error 98|EADDRINUSE", text, re.I)
+    if busy:
+        if port:
+            return (
+                f"Port {port} is already in use. Another tunnel or process is listening on it. "
+                "Delete the existing tunnel or choose a different port."
+            )
+        return (
+            "This port is already in use. Delete the existing tunnel or choose a different port."
+        )
+
+    text = re.sub(r"thread 'main' \(.*?\) panicked at .*", "", text)
+    text = re.sub(r"note: run with `RUST_BACKTRACE=1`.*", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    if len(text) > 420:
+        text = text[:420].rstrip() + "…"
+    return text or message
+
+
 def mss_for_mtu(mtu: int, default: int = DEFAULT_TUNNEL_TCP_MSS) -> int:
     """Compute a safe TCP MSS from path MTU (IPv4+TCP headers = 40 bytes)."""
     try:

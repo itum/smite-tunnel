@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { Plus, Copy, Trash2, CheckCircle, XCircle, Download, AlertCircle } from 'lucide-react'
 import api from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { useLanguage } from '../contexts/LanguageContext'
 
 interface Node {
@@ -23,6 +24,12 @@ const Nodes = () => {
   const [certLoading, setCertLoading] = useState(false)
   const [copied, setCopied] = useState(false)
   const [greLoading, setGreLoading] = useState(false)
+  const [showGreModal, setShowGreModal] = useState(false)
+  const [greMtu, setGreMtu] = useState('1472')
+  const [greInfo, setGreInfo] = useState<{ iface?: string; mss?: number; configured?: boolean; iran_inner?: string; foreign_inner?: string } | null>(null)
+  const [greProbing, setGreProbing] = useState(false)
+  const [greProbe, setGreProbe] = useState<{ recommended_mtu: number; underlay_mtu: number; mss: number; message: string } | null>(null)
+  const [greProbeError, setGreProbeError] = useState('')
 
   useEffect(() => {
     fetchNodes()
@@ -76,8 +83,7 @@ const Nodes = () => {
       setCertContent(text)
     } catch (error: any) {
       console.error('Failed to fetch CA:', error)
-      const errorMessage = error.response?.data?.detail || error.message || 'Failed to fetch CA certificate'
-      alert(`Failed to fetch CA certificate: ${errorMessage}`)
+      alert(apiErrorMessage(error, 'Failed to fetch CA certificate'))
       setShowCertModal(false)
     } finally {
       setCertLoading(false)
@@ -107,26 +113,53 @@ const Nodes = () => {
       fetchNodes()
     } catch (error) {
       console.error('Failed to delete node:', error)
-      alert('Failed to delete node')
+      alert(apiErrorMessage(error, 'Failed to delete node'))
+    }
+  }
+
+  const openGreSettings = async () => {
+    setShowGreModal(true)
+    try {
+      setGreProbe(null)
+      setGreProbeError('')
+      const response = await api.get('/nodes/gre/status')
+      setGreInfo(response.data)
+      if (response.data?.mtu) setGreMtu(String(response.data.mtu))
+    } catch (error) {
+      console.error('Failed to load GRE status:', error)
+    }
+  }
+
+  const probeGre = async () => {
+    setGreProbing(true)
+    setGreProbeError('')
+    try {
+      const response = await api.post('/nodes/gre/probe', {})
+      setGreProbe(response.data)
+    } catch (error) {
+      setGreProbe(null)
+      setGreProbeError(apiErrorMessage(error, 'MTU test failed. Current GRE MTU was not changed.'))
+    } finally {
+      setGreProbing(false)
     }
   }
 
   const setupGre = async () => {
-    if (!confirm('Create GRE between Iran and foreign nodes? Underlay NIC is auto-detected on each server.')) {
+    const mtu = parseInt(greMtu, 10)
+    if (!mtu || mtu < 1280 || mtu > 1500) {
+      alert('GRE MTU must be between 1280 and 1500')
       return
     }
     setGreLoading(true)
     try {
-      const response = await api.post('/nodes/gre/setup', {})
+      const response = await api.post('/nodes/gre/setup', { mtu })
       const data = response.data
-      alert(
-        data?.message ||
-          `GRE ${data?.status}: Iran ${data?.iran?.inner} ↔ Foreign ${data?.foreign?.inner}`
-      )
+      alert(data?.message || `GRE MTU ${data?.mtu}, tunnel MSS ${data?.mss}`)
+      setShowGreModal(false)
       fetchNodes()
     } catch (error: any) {
       console.error('GRE setup failed:', error)
-      alert(error.response?.data?.detail || error.message || 'GRE setup failed')
+      alert(apiErrorMessage(error, 'GRE setup failed'))
     } finally {
       setGreLoading(false)
     }
@@ -152,12 +185,11 @@ const Nodes = () => {
         </div>
         <div className="flex gap-3">
           <button
-            onClick={setupGre}
-            disabled={greLoading}
-            className="px-4 py-2.5 bg-teal-600 text-white rounded-lg hover:bg-teal-700 disabled:opacity-60 transition-all duration-200 font-medium shadow-sm hover:shadow-md flex items-center gap-2"
-            title="Auto-create GRE Iran↔Foreign (any NIC name)"
+            onClick={openGreSettings}
+            className="px-4 py-2.5 bg-teal-600 text-white rounded-lg hover:bg-teal-700 transition-all duration-200 font-medium shadow-sm hover:shadow-md flex items-center gap-2"
+            title="GRE interface settings. MTU is set on GRE; tunnels inherit MSS."
           >
-            {greLoading ? 'Setting GRE…' : 'Setup GRE'}
+            GRE settings
           </button>
           <button
             onClick={showCA}
@@ -314,6 +346,76 @@ const Nodes = () => {
           copied={copied}
         />
       )}
+
+      {showGreModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
+          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-md">
+            <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-2">GRE settings</h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+              MTU is set on the GRE interface. Tunnels do not have their own MTU; they inherit TCP MSS from this value (capped at 1360).
+            </p>
+            <div className="text-sm text-gray-700 dark:text-gray-300 space-y-1 mb-4">
+              <div>Interface: <span className="font-mono">{greInfo?.iface || 'smite-gre'}</span></div>
+              <div>Iran inner: <span className="font-mono">{greInfo?.iran_inner || '172.17.1.2'}</span></div>
+              <div>Foreign inner: <span className="font-mono">{greInfo?.foreign_inner || '172.17.1.1'}</span></div>
+              <div>Current MSS: <span className="font-mono">{greInfo?.mss ?? '—'}</span></div>
+            </div>
+            <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">GRE MTU</label>
+            <input
+              type="number"
+              min={1280}
+              max={1500}
+              value={greMtu}
+              onChange={(e) => setGreMtu(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white mb-1"
+            />
+            <p className="text-xs text-gray-500 dark:text-gray-400 mb-3">
+              Default 1472 (1500 − 28 byte GRE/IP header). MSS applied to tunnels: {Math.max(536, Math.min(1360, (parseInt(greMtu, 10) || 1472) - 40))}. You can type any value from 1280 to 1500.
+            </p>
+            <button
+              type="button"
+              onClick={probeGre}
+              disabled={greProbing || greLoading}
+              className="w-full mb-3 px-4 py-2 bg-slate-700 text-white rounded-lg disabled:opacity-60"
+            >
+              {greProbing ? 'Testing path MTU…' : 'Test MTU between servers'}
+            </button>
+            {greProbeError && (
+              <p className="text-sm text-red-600 dark:text-red-400 mb-3">{greProbeError}</p>
+            )}
+            {greProbe && (
+              <div className="mb-4 rounded-lg border border-teal-200 dark:border-teal-800 bg-teal-50 dark:bg-teal-950/40 p-3 text-sm text-teal-900 dark:text-teal-100">
+                <p>{greProbe.message}</p>
+                <button
+                  type="button"
+                  onClick={() => setGreMtu(String(greProbe.recommended_mtu))}
+                  className="mt-2 px-3 py-1.5 bg-teal-700 text-white rounded-lg"
+                >
+                  Use {greProbe.recommended_mtu}
+                </button>
+              </div>
+            )}
+            <div className="flex gap-3 justify-end">
+              <button
+                type="button"
+                onClick={() => setShowGreModal(false)}
+                disabled={greLoading}
+                className="px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={setupGre}
+                disabled={greLoading}
+                className="px-4 py-2 bg-teal-600 text-white rounded-lg disabled:opacity-60"
+              >
+                {greLoading ? 'Applying…' : 'Apply GRE'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
@@ -341,7 +443,7 @@ const AddNodeModal = ({ onClose, onSuccess }: AddNodeModalProps) => {
       onSuccess()
     } catch (error) {
       console.error('Failed to add node:', error)
-      alert('Failed to add node')
+      alert(apiErrorMessage(error, 'Failed to add node'))
     }
   }
 

@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Plus, Trash2, Edit2, RotateCw } from 'lucide-react'
 import api from '../api/client'
+import { apiErrorMessage } from '../api/errors'
 import { parseAddressPort, formatAddressPort } from '../utils/addressUtils'
 import { useLanguage } from '../contexts/LanguageContext'
 
@@ -10,12 +11,28 @@ interface Tunnel {
   core: string
   type: string
   node_id: string
+  iran_node_id?: string
+  foreign_node_id?: string
   spec: Record<string, any>
   status: string
   error_message?: string | null
   revision: number
   created_at: string
   updated_at: string
+}
+
+interface PortLive {
+  port: number
+  status: 'live' | 'offline' | 'error' | string
+  error?: string | null
+}
+
+interface TunnelLive {
+  status: 'live' | 'offline' | 'error' | string
+  process_running?: boolean
+  ports: PortLive[]
+  control?: PortLive | null
+  error?: string | null
 }
 
 type BackhaulTransport = 'tcp' | 'udp' | 'ws' | 'wsmux' | 'tcpmux'
@@ -181,6 +198,34 @@ const Tunnels = () => {
   const [showAddModal, setShowAddModal] = useState(false)
   const [editingTunnel, setEditingTunnel] = useState<Tunnel | null>(null)
   const [reapplyingAll, setReapplyingAll] = useState(false)
+  const [showBench, setShowBench] = useState(false)
+  const [benchIran, setBenchIran] = useState('')
+  const [benchForeign, setBenchForeign] = useState('')
+  const [benchRunning, setBenchRunning] = useState(false)
+  const [benchError, setBenchError] = useState('')
+  const [benchLogs, setBenchLogs] = useState<Array<{ ts: string; level: string; message: string }>>([])
+  const [benchJobId, setBenchJobId] = useState('')
+  const benchLogRef = useRef<HTMLDivElement | null>(null)
+  const [benchResult, setBenchResult] = useState<{
+    message: string
+    best_port?: number
+    best?: { core: string; type: string; port: number; upload_mbps: number; download_mbps: number } | null
+    rows: Array<{ label: string; core: string; type: string; port?: number; ok: boolean; upload_mbps?: number; download_mbps?: number; error?: string }>
+  } | null>(null)
+  const [liveMap, setLiveMap] = useState<Record<string, TunnelLive>>({})
+  const [liveLoading, setLiveLoading] = useState(false)
+
+  const fetchLiveStatus = async () => {
+    setLiveLoading(true)
+    try {
+      const response = await api.get('/tunnels/live-status')
+      setLiveMap(response.data?.tunnels || {})
+    } catch (error) {
+      console.error('Failed to fetch live tunnel status:', error)
+    } finally {
+      setLiveLoading(false)
+    }
+  }
 
   useEffect(() => {
     fetchData()
@@ -189,8 +234,14 @@ const Tunnels = () => {
       setShowAddModal(true)
       window.history.replaceState({}, '', '/tunnels')
     }
-    
   }, [])
+
+  useEffect(() => {
+    if (loading) return
+    fetchLiveStatus()
+    const timer = setInterval(fetchLiveStatus, 10000)
+    return () => clearInterval(timer)
+  }, [loading])
 
   const fetchData = async () => {
     try {
@@ -220,25 +271,27 @@ const Tunnels = () => {
     
     try {
       await api.delete(`/tunnels/${id}`)
-      fetchData()
+      await fetchData()
+      fetchLiveStatus()
     } catch (error) {
       console.error('Failed to delete tunnel:', error)
-      alert('Failed to delete tunnel')
+      alert(apiErrorMessage(error, 'Failed to delete tunnel'))
     }
   }
 
   const reapplyTunnel = async (tunnel: Tunnel) => {
     try {
       const response = await api.post(`/tunnels/${tunnel.id}/apply`)
-      if (response.data && response.data.status === 'success') {
-        fetchData()
+      const st = response.data?.status
+      if (st === 'success' || st === 'applied' || st === 'ok') {
+        await fetchData()
+        fetchLiveStatus()
       } else {
         throw new Error(response.data?.message || 'Failed to reapply tunnel')
       }
     } catch (error: any) {
       console.error('Failed to reapply tunnel:', error)
-      const errorMessage = error.response?.data?.detail || error.message || 'Failed to reapply tunnel'
-      alert(errorMessage)
+      alert(apiErrorMessage(error, 'Failed to reapply tunnel'))
     }
   }
 
@@ -250,16 +303,58 @@ const Tunnels = () => {
       const response = await api.post('/tunnels/reapply-all')
       if (response.data && response.data.status === 'success') {
         alert(`${t.tunnels.reapplyAllSuccess || 'Success'}: ${response.data.message}`)
-        fetchData()
+        await fetchData()
+        fetchLiveStatus()
       } else {
         throw new Error(response.data?.message || 'Failed to reapply all tunnels')
       }
     } catch (error: any) {
       console.error('Failed to reapply all tunnels:', error)
-      const errorMessage = error.response?.data?.detail || error.message || 'Failed to reapply all tunnels'
-      alert(errorMessage)
+      alert(apiErrorMessage(error, 'Failed to reapply all tunnels'))
     } finally {
       setReapplyingAll(false)
+    }
+  }
+
+  useEffect(() => {
+    if (benchLogRef.current) {
+      benchLogRef.current.scrollTop = benchLogRef.current.scrollHeight
+    }
+  }, [benchLogs])
+
+  const runBench = async () => {
+    setBenchRunning(true)
+    setBenchError('')
+    setBenchResult(null)
+    setBenchLogs([{ ts: new Date().toISOString().slice(11, 19), level: 'info', message: 'Starting path test…' }])
+    setBenchJobId('')
+    try {
+      const started = await api.post('/nodes/path-bench/start', {
+        iran_node_id: benchIran || null,
+        foreign_node_id: benchForeign || null,
+      })
+      const jobId = started.data?.job_id as string
+      setBenchJobId(jobId)
+      setBenchLogs((prev) => [...prev, { ts: new Date().toISOString().slice(11, 19), level: 'info', message: `Job ${jobId.slice(0, 8)} started on panel` }])
+
+      for (let i = 0; i < 180; i++) {
+        await new Promise((r) => setTimeout(r, 700))
+        const status = await api.get(`/nodes/path-bench/jobs/${jobId}`)
+        const logs = status.data?.logs || []
+        setBenchLogs(logs)
+        if (status.data?.state === 'done') {
+          setBenchResult(status.data.result)
+          break
+        }
+        if (status.data?.state === 'error') {
+          setBenchError(status.data?.error || 'Path test failed. Existing tunnels were not changed.')
+          break
+        }
+      }
+    } catch (error) {
+      setBenchError(apiErrorMessage(error, 'Path test failed. Existing tunnels were not changed.'))
+    } finally {
+      setBenchRunning(false)
     }
   }
 
@@ -282,6 +377,20 @@ const Tunnels = () => {
           <p className="text-gray-500 dark:text-gray-400">{t.tunnels.subtitle}</p>
         </div>
         <div className="flex gap-3">
+          <button
+            onClick={() => {
+              setBenchError('')
+              setBenchResult(null)
+              setBenchLogs([])
+              setBenchJobId('')
+              setBenchIran(nodes[0]?.id || '')
+              setBenchForeign(servers[0]?.id || '')
+              setShowBench(true)
+            }}
+            className="px-5 py-2.5 bg-slate-800 text-white rounded-lg hover:bg-slate-900 font-medium shadow-sm flex items-center gap-2"
+          >
+            Best tunnel test
+          </button>
           <button
             onClick={handleReapplyAll}
             disabled={reapplyingAll}
@@ -343,6 +452,36 @@ const Tunnels = () => {
           const ports = getPorts()
           const iranNode = nodes.find(n => n.id === tunnel.iran_node_id || n.id === tunnel.node_id)
           const foreignServer = servers.find(s => s.id === tunnel.foreign_node_id)
+          const live = liveMap[tunnel.id]
+          const displayStatus = live?.status || (liveLoading ? 'checking' : tunnel.status)
+          const statusLabel =
+            displayStatus === 'live' || displayStatus === 'active'
+              ? 'live'
+              : displayStatus === 'offline'
+              ? 'offline'
+              : displayStatus === 'checking'
+              ? 'checking'
+              : 'error'
+          const statusClass =
+            statusLabel === 'live'
+              ? 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-200'
+              : statusLabel === 'offline'
+              ? 'bg-gray-200 dark:bg-gray-700 text-gray-800 dark:text-gray-200'
+              : statusLabel === 'checking'
+              ? 'bg-amber-100 dark:bg-amber-900/30 text-amber-800 dark:text-amber-200'
+              : 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-200'
+          const portRows: PortLive[] =
+            live?.ports?.length
+              ? live.ports
+              : ports
+                  .split(',')
+                  .map((p) => p.trim())
+                  .filter(Boolean)
+                  .map((p) => ({
+                    port: parseInt(p, 10) || 0,
+                    status: liveLoading ? 'checking' : 'offline',
+                    error: liveLoading ? null : 'Waiting for live probe',
+                  }))
 
           return (
             <div
@@ -351,17 +490,12 @@ const Tunnels = () => {
             >
               <div className="flex items-start justify-between gap-4">
                 <div className="flex items-start gap-4 flex-1 min-w-0">
-                  {/* Status Badge */}
+                  {/* Status Badge — from real listen probe when available */}
                   <span
-                    className={`px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap shrink-0 ${
-                      tunnel.status === 'active'
-                        ? 'bg-green-100 dark:bg-green-900/30 text-green-800 dark:text-green-200'
-                        : tunnel.status === 'error'
-                        ? 'bg-red-100 dark:bg-red-900/30 text-red-800 dark:text-red-200'
-                        : 'bg-gray-100 dark:bg-gray-700 text-gray-800 dark:text-gray-200'
-                    }`}
+                    className={`px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap shrink-0 ${statusClass}`}
+                    title={live?.error || tunnel.error_message || ''}
                   >
-                    {tunnel.status}
+                    {statusLabel}
                   </span>
 
                   <div className="flex-1 min-w-0">
@@ -411,9 +545,34 @@ const Tunnels = () => {
                           </span>
                         )
                       })()}
-                      <div className="flex items-center gap-1.5">
+                      <div className="flex items-center gap-1.5 flex-wrap">
                         <span className="text-xs font-medium text-gray-500 dark:text-gray-400">Ports:</span>
-                        <span className="text-sm font-mono font-semibold text-gray-700 dark:text-gray-300">{ports}</span>
+                        {portRows.map((row) => {
+                          const st = row.status === 'live' ? 'live' : row.status === 'checking' ? 'checking' : row.status === 'offline' ? 'offline' : 'error'
+                          const chip =
+                            st === 'live'
+                              ? 'bg-green-50 dark:bg-green-900/20 text-green-800 dark:text-green-200 border-green-300 dark:border-green-700'
+                              : st === 'checking'
+                              ? 'bg-amber-50 dark:bg-amber-900/20 text-amber-800 dark:text-amber-200 border-amber-300 dark:border-amber-700'
+                              : st === 'offline'
+                              ? 'bg-gray-50 dark:bg-gray-700/40 text-gray-700 dark:text-gray-300 border-gray-300 dark:border-gray-600'
+                              : 'bg-red-50 dark:bg-red-900/20 text-red-800 dark:text-red-200 border-red-300 dark:border-red-700'
+                          return (
+                            <span
+                              key={`${tunnel.id}-${row.port}`}
+                              title={row.error || st}
+                              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-mono border ${chip}`}
+                            >
+                              <span
+                                className={`inline-block w-1.5 h-1.5 rounded-full ${
+                                  st === 'live' ? 'bg-green-500' : st === 'checking' ? 'bg-amber-500' : st === 'offline' ? 'bg-gray-400' : 'bg-red-500'
+                                }`}
+                              />
+                              {row.port || '?'}
+                              <span className="font-sans font-semibold uppercase tracking-wide">{st}</span>
+                            </span>
+                          )
+                        })}
                       </div>
                     </div>
 
@@ -467,10 +626,21 @@ const Tunnels = () => {
                       )}
                     </div>
 
-                    {/* Error Message */}
-                    {tunnel.status === 'error' && tunnel.error_message && (
+                    {/* Error Message — prefer live probe text */}
+                    {(live?.error || tunnel.error_message) && statusLabel !== 'live' && (
                       <div className="mt-2 text-xs text-red-600 dark:text-red-400">
-                        {tunnel.error_message}
+                        {live?.error || tunnel.error_message}
+                      </div>
+                    )}
+                    {live?.ports?.some((p) => p.status !== 'live' && p.error) && (
+                      <div className="mt-1 space-y-0.5">
+                        {live.ports
+                          .filter((p) => p.status !== 'live' && p.error)
+                          .map((p) => (
+                            <div key={`err-${tunnel.id}-${p.port}`} className="text-xs text-red-600 dark:text-red-400">
+                              Port {p.port}: {p.error}
+                            </div>
+                          ))}
                       </div>
                     )}
                   </div>
@@ -506,6 +676,121 @@ const Tunnels = () => {
         })}
       </div>
 
+      {showBench && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
+          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+            <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-1">Best tunnel test</h2>
+            <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+              Measures real TCP upload and download between the selected servers, then compares GOST and FRP on temporary ports. Existing tunnels are not changed. Only one test can run at a time.
+            </p>
+            <div className="grid grid-cols-2 gap-3 mb-4">
+              <label className="text-sm text-gray-700 dark:text-gray-300">
+                Iran node
+                <select
+                  value={benchIran}
+                  onChange={(e) => setBenchIran(e.target.value)}
+                  disabled={benchRunning}
+                  className="mt-1 w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white disabled:opacity-60"
+                >
+                  {nodes.map((node) => (
+                    <option key={node.id} value={node.id}>{node.name}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="text-sm text-gray-700 dark:text-gray-300">
+                Foreign server
+                <select
+                  value={benchForeign}
+                  onChange={(e) => setBenchForeign(e.target.value)}
+                  disabled={benchRunning}
+                  className="mt-1 w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white disabled:opacity-60"
+                >
+                  {servers.map((server) => (
+                    <option key={server.id} value={server.id}>{server.name}</option>
+                  ))}
+                </select>
+              </label>
+            </div>
+
+            <div className="mb-4">
+              <div className="flex items-center justify-between mb-1">
+                <span className="text-xs font-medium text-gray-500 dark:text-gray-400">
+                  Server log {benchJobId ? `(job ${benchJobId.slice(0, 8)})` : ''}
+                </span>
+                {benchRunning && <span className="text-xs text-amber-600 dark:text-amber-400">running…</span>}
+              </div>
+              <div
+                ref={benchLogRef}
+                className="h-56 overflow-y-auto rounded-lg bg-gray-950 text-gray-100 font-mono text-xs p-3 border border-gray-800"
+              >
+                {benchLogs.length === 0 ? (
+                  <div className="text-gray-500">Press Run test to see live progress from the panel and nodes.</div>
+                ) : (
+                  benchLogs.map((line, idx) => (
+                    <div
+                      key={`${line.ts}-${idx}`}
+                      className={
+                        line.level === 'error'
+                          ? 'text-red-400'
+                          : line.level === 'warn'
+                          ? 'text-amber-300'
+                          : 'text-gray-200'
+                      }
+                    >
+                      <span className="text-gray-500">[{line.ts}]</span> {line.message}
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+
+            {benchError && <p className="text-sm text-red-600 dark:text-red-400 mb-3">{benchError}</p>}
+            {benchResult && (
+              <div className="mb-4">
+                <p className="text-sm text-teal-800 dark:text-teal-200 mb-3">{benchResult.message}</p>
+                <table className="w-full text-sm">
+                  <thead>
+                    <tr className="text-left text-gray-500 dark:text-gray-400">
+                      <th className="py-1">Test</th>
+                      <th>Type</th>
+                      <th>Upload</th>
+                      <th>Download</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {benchResult.rows.map((row) => (
+                      <tr key={row.label} className="border-t border-gray-100 dark:border-gray-700 text-gray-800 dark:text-gray-100">
+                        <td className="py-2">{row.label}</td>
+                        <td>{row.type.toUpperCase()}</td>
+                        <td>{row.ok ? `${row.upload_mbps} Mbps` : row.error}</td>
+                        <td>{row.ok ? `${row.download_mbps} Mbps` : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            <div className="flex gap-3 justify-end">
+              <button
+                type="button"
+                onClick={() => setShowBench(false)}
+                className="px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg"
+              >
+                Close
+              </button>
+              <button
+                type="button"
+                onClick={runBench}
+                disabled={benchRunning || !benchIran || !benchForeign}
+                className="px-4 py-2 bg-slate-800 text-white rounded-lg disabled:opacity-60"
+              >
+                {benchRunning ? 'Testing…' : 'Run test'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showAddModal && (
         <AddTunnelModal
           nodes={nodes}
@@ -513,7 +798,7 @@ const Tunnels = () => {
           onClose={() => setShowAddModal(false)}
           onSuccess={() => {
             setShowAddModal(false)
-            fetchData()
+            fetchData().then(() => fetchLiveStatus())
           }}
         />
       )}
@@ -525,7 +810,7 @@ const Tunnels = () => {
           onClose={() => setEditingTunnel(null)}
           onSuccess={() => {
             setEditingTunnel(null)
-            fetchData()
+            fetchData().then(() => fetchLiveStatus())
           }}
         />
       )}
@@ -597,11 +882,33 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
   const [backhaulState, setBackhaulState] = useState<BackhaulFormState>(parsedBackhaul.state)
   const [backhaulAdvanced, setBackhaulAdvanced] = useState<BackhaulAdvancedState>(parsedBackhaul.advanced)
   const [showBackhaulAdvanced, setShowBackhaulAdvanced] = useState(false)
+  const submittingRef = useRef(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [formError, setFormError] = useState<string | null>(null)
+  const [core, setCore] = useState(tunnel.core)
+  const [tunnelType, setTunnelType] = useState(
+    tunnel.core === 'chisel' || tunnel.core === 'bore' ? 'tcp' : (tunnel.type || 'tcp')
+  )
+
+  const typesForCore = (value: string): string[] => {
+    if (value === 'rathole') return ['tcp', 'ws']
+    if (value === 'frp' || value === 'wstunnel') return ['tcp', 'udp']
+    if (value === 'backhaul') return ['tcp', 'udp', 'ws', 'wsmux', 'tcpmux']
+    if (value === 'chisel' || value === 'bore') return ['tcp']
+    return ['tcp', 'udp', 'grpc', 'tcpmux']
+  }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    e.stopPropagation()
+    if (submittingRef.current) {
+      return
+    }
+    submittingRef.current = true
+    setSubmitting(true)
+    setFormError(null)
     try {
-      let updatedSpec = { ...tunnel.spec }
+      let updatedSpec = core === tunnel.core ? { ...tunnel.spec } : {}
       
       const useV4ToV6 = updatedSpec.use_ipv6 || false
       
@@ -618,10 +925,12 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
       const ports = parsePorts(formData.ports)
       if (ports.length === 0) {
         alert('Please enter at least one valid port')
+        submittingRef.current = false
+        setSubmitting(false)
         return
       }
       
-      if (tunnel.core === 'rathole') {
+      if (core === 'rathole') {
         if (formData.rathole_remote_addr) {
           const remoteHost = window.location.hostname
           const remotePort = formData.rathole_remote_addr.includes(':') 
@@ -635,13 +944,15 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
         updatedSpec.ports = ports
         updatedSpec.remote_port = ports[0]  // Keep for backward compatibility
         updatedSpec.listen_port = ports[0]  // Keep for backward compatibility
-      } else if (tunnel.core === 'gost' && (tunnel.type === 'tcp' || tunnel.type === 'udp' || tunnel.type === 'grpc' || tunnel.type === 'tcpmux')) {
+      } else if (core === 'gost') {
+        delete updatedSpec.forward_to
+        updatedSpec.type = tunnelType
         const remoteIp = formData.remote_ip || '127.0.0.1'
         updatedSpec.remote_ip = remoteIp
         updatedSpec.ports = ports
         updatedSpec.remote_port = ports[0]  // Keep for backward compatibility
         updatedSpec.listen_port = ports[0]  // Keep for backward compatibility
-      } else if (tunnel.core === 'chisel') {
+      } else if (core === 'chisel') {
         updatedSpec.ports = ports
         const firstPort = ports[0]
         updatedSpec.listen_port = firstPort
@@ -653,7 +964,7 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
         if (formData.node_ipv6) {
           updatedSpec.node_ipv6 = formData.node_ipv6
         }
-      } else if (tunnel.core === 'wstunnel') {
+      } else if (core === 'wstunnel') {
         updatedSpec.ports = ports
         const firstPort = ports[0]
         updatedSpec.listen_port = firstPort
@@ -662,9 +973,9 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
           ? parseInt(formData.wstunnel_control_port.toString())
           : firstPort + 10000
         updatedSpec.control_port = controlPort
-        updatedSpec.type = tunnel.type === 'udp' ? 'udp' : 'tcp'
+        updatedSpec.type = tunnelType === 'udp' ? 'udp' : 'tcp'
         updatedSpec.local_addr = `127.0.0.1:${firstPort}`
-      } else if (tunnel.core === 'bore') {
+      } else if (core === 'bore') {
         updatedSpec.ports = ports
         const firstPort = ports[0]
         updatedSpec.listen_port = firstPort
@@ -672,7 +983,7 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
         updatedSpec.control_port = 7835
         updatedSpec.type = 'tcp'
         updatedSpec.local_host = '127.0.0.1'
-      } else if (tunnel.core === 'frp') {
+      } else if (core === 'frp') {
         const bindPort = parseInt(formData.frp_bind_port) || 7000
         updatedSpec.bind_port = bindPort
         updatedSpec.ports = ports
@@ -685,9 +996,9 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
         }
         updatedSpec.local_ip = formData.frp_local_ip || '127.0.0.1'
         updatedSpec.local_port = ports[0]  // Keep for backward compatibility
-        updatedSpec.type = tunnel.type === 'udp' ? 'udp' : 'tcp'
-      } else if (tunnel.core === 'backhaul') {
-        updatedSpec = buildBackhaulSpec(backhaulState, backhaulAdvanced, tunnel.type as BackhaulTransport)
+        updatedSpec.type = tunnelType === 'udp' ? 'udp' : 'tcp'
+      } else if (core === 'backhaul') {
+        updatedSpec = buildBackhaulSpec(backhaulState, backhaulAdvanced, tunnelType as BackhaulTransport)
         // Override ports if provided
         if (ports.length > 0) {
           const targetHost = updatedSpec.target_host || '127.0.0.1'
@@ -697,20 +1008,30 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
 
       await api.put(`/tunnels/${tunnel.id}`, {
         name: formData.name,
+        core,
+        type: core === 'backhaul' ? backhaulState.transport : tunnelType,
         spec: updatedSpec,
       })
       onSuccess()
     } catch (error) {
       console.error('Failed to update tunnel:', error)
-      alert('Failed to update tunnel')
+      setFormError(apiErrorMessage(error, 'Failed to update tunnel'))
+      submittingRef.current = false
+      setSubmitting(false)
     }
   }
 
   return (
     <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-md">
-        <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-4">Edit Tunnel</h2>
+      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto">
+        <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-1">Edit Tunnel</h2>
+        <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
+          Saving applies the new port, type, and core immediately. The previous process for this tunnel is replaced, not duplicated.
+        </p>
         <form onSubmit={handleSubmit} className="space-y-4">
+          {formError && (
+            <p className="text-sm text-red-600 dark:text-red-400">{formError}</p>
+          )}
           <div>
             <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
               {t.tunnels.name}
@@ -723,7 +1044,52 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
               required
             />
           </div>
-          {tunnel.core === 'gost' && (tunnel.type === 'tcp' || tunnel.type === 'udp' || tunnel.type === 'grpc' || tunnel.type === 'tcpmux') && (
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Core</label>
+              <select
+                value={core}
+                onChange={(e) => {
+                  const next = e.target.value
+                  const allowed = typesForCore(next)
+                  setCore(next)
+                  setTunnelType(allowed.includes(tunnelType) ? tunnelType : allowed[0])
+                  if (next === 'backhaul') {
+                    setBackhaulState((prev) => ({ ...prev, transport: (allowed.includes(tunnelType) ? tunnelType : allowed[0]) as BackhaulTransport }))
+                  }
+                }}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white"
+              >
+                <option value="gost">GOST</option>
+                <option value="frp">FRP</option>
+                <option value="bore">Bore</option>
+                <option value="chisel">Chisel</option>
+                <option value="wstunnel">Wstunnel</option>
+                <option value="rathole">Rathole</option>
+                <option value="backhaul">Backhaul</option>
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Type</label>
+              <select
+                value={typesForCore(core).includes(tunnelType) ? tunnelType : typesForCore(core)[0]}
+                onChange={(e) => {
+                  const value = e.target.value
+                  setTunnelType(value)
+                  if (core === 'backhaul') {
+                    setBackhaulState((prev) => ({ ...prev, transport: value as BackhaulTransport }))
+                  }
+                }}
+                disabled={core === 'chisel' || core === 'bore'}
+                className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white disabled:opacity-70"
+              >
+                {typesForCore(core).map((item) => (
+                  <option key={item} value={item}>{item.toUpperCase()}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          {core === 'gost' && (
             <>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -762,7 +1128,7 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
             </>
           )}
           
-          {tunnel.core === 'backhaul' && (
+          {core === 'backhaul' && (
             <BackhaulForm
               state={backhaulState}
               onChange={(partial) => {
@@ -775,7 +1141,7 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
             />
           )}
           
-          {tunnel.core === 'rathole' && (
+          {core === 'rathole' && (
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 Ports
@@ -795,7 +1161,7 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
             </div>
           )}
           
-          {tunnel.core === 'rathole' && (
+          {core === 'rathole' && (
             <>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -816,26 +1182,10 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
                 />
                 <p className="text-xs text-gray-500 dark:text-gray-400 mt-1">Rathole server port on panel (IP: {window.location.hostname})</p>
               </div>
-              <div>
-                <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
-                  Local Port
-                </label>
-                <input
-                  type="number"
-                  value={formData.rathole_local_port}
-                  onChange={(e) =>
-                    setFormData({ ...formData, rathole_local_port: e.target.value })
-                  }
-                  className="w-full px-3 py-2 border border-gray-300 dark:border-gray-600 rounded-lg dark:bg-gray-700 dark:text-white"
-                  placeholder="8080"
-                  min="1"
-                  max="65535"
-                />
-              </div>
             </>
           )}
           
-          {tunnel.core === 'chisel' && (
+          {core === 'chisel' && (
             <>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -897,7 +1247,7 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
             </>
           )}
 
-          {tunnel.core === 'wstunnel' && (
+          {core === 'wstunnel' && (
             <>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -939,7 +1289,7 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
             </>
           )}
 
-          {tunnel.core === 'bore' && (
+          {core === 'bore' && (
             <>
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
@@ -976,7 +1326,7 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
             </>
           )}
           
-          {tunnel.core === 'frp' && (
+          {core === 'frp' && (
             <>
               <div className="grid grid-cols-2 gap-4">
                 <div>
@@ -1037,7 +1387,7 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
           )}
           
           {/* Node IPv6 address field for Rathole when v4 to v6 is enabled */}
-          {tunnel.core === 'rathole' && tunnel.spec?.use_ipv6 && (
+          {core === 'rathole' && tunnel.spec?.use_ipv6 && (
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 Node IPv6 Address (Optional)
@@ -1061,15 +1411,17 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600"
+              disabled={submitting}
+              className="px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50"
             >
               {t.tunnels.cancel}
             </button>
             <button
               type="submit"
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+              disabled={submitting}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              Save Changes
+              {submitting ? 'Saving…' : 'Save Changes'}
             </button>
           </div>
         </form>
@@ -1093,6 +1445,9 @@ interface AddTunnelModalProps {
 
 const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalProps) => {
   const { t } = useLanguage()
+  const submittingRef = useRef(false)
+  const [submitting, setSubmitting] = useState(false)
+  const [formError, setFormError] = useState<string | null>(null)
   const [formData, setFormData] = useState({
     name: '',
     core: 'gost',
@@ -1142,6 +1497,14 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    e.stopPropagation()
+    // Guard double-submit (double-click / Enter twice) before React state updates.
+    if (submittingRef.current) {
+      return
+    }
+    submittingRef.current = true
+    setSubmitting(true)
+    setFormError(null)
     try {
       let spec = getSpecForType(formData.core, formData.type)
       let tunnelType = formData.type
@@ -1161,6 +1524,8 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
       const ports = parsePorts(formData.ports)
       if (ports.length === 0) {
         alert('Please enter at least one valid port')
+        submittingRef.current = false
+        setSubmitting(false)
         return
       }
       
@@ -1228,6 +1593,8 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
       if (formData.core === 'backhaul') {
         if (!formData.node_id) {
           alert('Backhaul tunnels require a node')
+          submittingRef.current = false
+          setSubmitting(false)
           return
         }
         // CRITICAL: For Backhaul, the Ports field is in BackhaulForm, not in the main formData.ports
@@ -1283,6 +1650,8 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
       if (formData.core === 'frp') {
         if (!formData.node_id) {
           alert('FRP tunnels require a node')
+          submittingRef.current = false
+          setSubmitting(false)
           return
         }
         const bindPort = parseInt(formData.frp_bind_port) || 7000
@@ -1310,9 +1679,12 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
       }
       await api.post('/tunnels', payload)
       onSuccess()
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to create tunnel:', error)
-      alert('Failed to create tunnel')
+      const message = apiErrorMessage(error, 'Failed to create tunnel')
+      setFormError(message)
+      submittingRef.current = false
+      setSubmitting(false)
     }
   }
 
@@ -1799,19 +2171,26 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
             </>
           )}
 
+          {formError && (
+            <div className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-900 dark:bg-red-950/40 dark:text-red-300 whitespace-pre-wrap">
+              {formError}
+            </div>
+          )}
           <div className="flex gap-3 justify-end">
             <button
               type="button"
               onClick={onClose}
-              className="px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600"
+              disabled={submitting}
+              className="px-4 py-2 bg-gray-100 dark:bg-gray-700 text-gray-700 dark:text-gray-200 rounded-lg hover:bg-gray-200 dark:hover:bg-gray-600 disabled:opacity-50"
             >
               {t.tunnels.cancel}
             </button>
             <button
               type="submit"
-              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700"
+              disabled={submitting}
+              className="px-4 py-2 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              {t.tunnels.createTunnel}
+              {submitting ? 'Creating…' : t.tunnels.createTunnel}
             </button>
           </div>
         </form>
