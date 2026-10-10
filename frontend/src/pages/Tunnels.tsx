@@ -370,13 +370,13 @@ const Tunnels = () => {
   }
 
   return (
-    <div className="w-full max-w-7xl mx-auto">
-      <div className="flex justify-between items-center mb-8">
-        <div>
-          <h1 className="text-3xl font-bold text-gray-900 dark:text-white mb-2">{t.tunnels.title}</h1>
-          <p className="text-gray-500 dark:text-gray-400">{t.tunnels.subtitle}</p>
+    <div className="w-full max-w-7xl mx-auto px-1 sm:px-0">
+      <div className="flex flex-col gap-4 sm:flex-row sm:justify-between sm:items-center mb-6 sm:mb-8">
+        <div className="min-w-0">
+          <h1 className="text-2xl sm:text-3xl font-bold text-gray-900 dark:text-white mb-2">{t.tunnels.title}</h1>
+          <p className="text-sm sm:text-base text-gray-500 dark:text-gray-400">{t.tunnels.subtitle}</p>
         </div>
-        <div className="flex gap-3">
+        <div className="flex flex-col sm:flex-row gap-2 sm:gap-3 w-full sm:w-auto">
           <button
             onClick={() => {
               setBenchError('')
@@ -387,21 +387,21 @@ const Tunnels = () => {
               setBenchForeign(servers[0]?.id || '')
               setShowBench(true)
             }}
-            className="px-5 py-2.5 bg-slate-800 text-white rounded-lg hover:bg-slate-900 font-medium shadow-sm flex items-center gap-2"
+            className="w-full sm:w-auto justify-center px-5 py-2.5 bg-slate-800 text-white rounded-lg hover:bg-slate-900 font-medium shadow-sm flex items-center gap-2 text-sm sm:text-base"
           >
             Best tunnel test
           </button>
           <button
             onClick={handleReapplyAll}
             disabled={reapplyingAll}
-            className="px-5 py-2.5 bg-gradient-to-r from-green-600 to-emerald-600 text-white rounded-lg hover:from-green-700 hover:to-emerald-700 transition-all duration-200 font-medium shadow-sm hover:shadow-md flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="w-full sm:w-auto justify-center px-5 py-2.5 bg-gradient-to-r from-green-600 to-emerald-600 text-white rounded-lg hover:from-green-700 hover:to-emerald-700 transition-all duration-200 font-medium shadow-sm hover:shadow-md flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed text-sm sm:text-base"
           >
             <RotateCw size={20} className={reapplyingAll ? "animate-spin" : ""} />
             {t.tunnels.reapplyAll}
           </button>
           <button
             onClick={() => setShowAddModal(true)}
-            className="px-5 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg hover:from-blue-700 hover:to-indigo-700 transition-all duration-200 font-medium shadow-sm hover:shadow-md flex items-center gap-2"
+            className="w-full sm:w-auto justify-center px-5 py-2.5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-lg hover:from-blue-700 hover:to-indigo-700 transition-all duration-200 font-medium shadow-sm hover:shadow-md flex items-center gap-2 text-sm sm:text-base"
           >
             <Plus size={20} />
             {t.tunnels.createTunnel}
@@ -486,10 +486,10 @@ const Tunnels = () => {
           return (
             <div
               key={tunnel.id}
-              className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-5 transition-all hover:shadow-lg hover:border-gray-300 dark:hover:border-gray-600"
+              className="bg-white dark:bg-gray-800 rounded-xl shadow-sm border border-gray-200 dark:border-gray-700 p-4 sm:p-5 transition-all hover:shadow-lg hover:border-gray-300 dark:hover:border-gray-600 overflow-hidden"
             >
-              <div className="flex items-start justify-between gap-4">
-                <div className="flex items-start gap-4 flex-1 min-w-0">
+              <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4">
+                <div className="flex items-start gap-3 sm:gap-4 flex-1 min-w-0">
                   {/* Status Badge — from real listen probe when available */}
                   <span
                     className={`px-3 py-1.5 rounded-full text-xs font-semibold whitespace-nowrap shrink-0 ${statusClass}`}
@@ -500,8 +500,8 @@ const Tunnels = () => {
 
                   <div className="flex-1 min-w-0">
                     {/* Name, Core Badge, Transmission Badge, and Ports in one line */}
-                    <div className="flex items-center gap-3 mb-2 flex-wrap">
-                      <h3 className="text-base font-semibold text-gray-900 dark:text-white truncate">{tunnel.name}</h3>
+                    <div className="flex items-center gap-2 sm:gap-3 mb-2 flex-wrap break-words">
+                      <h3 className="text-base font-semibold text-gray-900 dark:text-white break-all min-w-0 max-w-full">{tunnel.name}</h3>
                       <span
                         className={`px-3 py-1.5 rounded-lg text-xs font-bold uppercase tracking-wide border ${coreBadge.bg} ${coreBadge.text} ${coreBadge.border} shrink-0`}
                       >
@@ -577,7 +577,7 @@ const Tunnels = () => {
                     </div>
 
                     {/* Core Port, Node and Server Info */}
-                    <div className="flex items-center gap-4 text-xs text-gray-500 dark:text-gray-400">
+                    <div className="flex items-center gap-x-4 gap-y-1.5 text-xs text-gray-500 dark:text-gray-400 flex-wrap break-words">
                       {(() => {
                         let corePort = null
                         if (tunnel.core === 'rathole') {
@@ -628,16 +628,16 @@ const Tunnels = () => {
 
                     {/* Error Message — prefer live probe text */}
                     {(live?.error || tunnel.error_message) && statusLabel !== 'live' && (
-                      <div className="mt-2 text-xs text-red-600 dark:text-red-400">
+                      <div className="mt-2 text-xs text-red-600 dark:text-red-400 break-words overflow-hidden">
                         {live?.error || tunnel.error_message}
                       </div>
                     )}
                     {live?.ports?.some((p) => p.status !== 'live' && p.error) && (
-                      <div className="mt-1 space-y-0.5">
+                      <div className="mt-1 space-y-0.5 break-words">
                         {live.ports
                           .filter((p) => p.status !== 'live' && p.error)
                           .map((p) => (
-                            <div key={`err-${tunnel.id}-${p.port}`} className="text-xs text-red-600 dark:text-red-400">
+                            <div key={`err-${tunnel.id}-${p.port}`} className="text-xs text-red-600 dark:text-red-400 break-words">
                               Port {p.port}: {p.error}
                             </div>
                           ))}
@@ -647,7 +647,7 @@ const Tunnels = () => {
                 </div>
 
                 {/* Action Buttons */}
-                <div className="flex gap-2 shrink-0">
+                <div className="flex sm:flex-col lg:flex-row gap-2 shrink-0 justify-end sm:justify-start border-t sm:border-t-0 border-gray-100 dark:border-gray-700 pt-3 sm:pt-0">
                   <button
                     onClick={() => reapplyTunnel(tunnel)}
                     className="p-2.5 text-green-600 hover:bg-green-50 dark:hover:bg-green-900/20 rounded-lg transition-colors"
@@ -677,13 +677,13 @@ const Tunnels = () => {
       </div>
 
       {showBench && (
-        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
-          <div className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-3xl max-h-[90vh] overflow-y-auto">
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100] p-3 sm:p-4 overflow-y-auto">
+          <div className="bg-white dark:bg-gray-800 rounded-lg p-4 sm:p-6 w-full max-w-3xl max-h-[90vh] overflow-y-auto my-auto">
             <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-1">Best tunnel test</h2>
             <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
               Measures real TCP upload and download between the selected servers, then compares GOST and FRP on temporary ports. Existing tunnels are not changed. Only one test can run at a time.
             </p>
-            <div className="grid grid-cols-2 gap-3 mb-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
               <label className="text-sm text-gray-700 dark:text-gray-300">
                 Iran node
                 <select
@@ -748,7 +748,7 @@ const Tunnels = () => {
             {benchResult && (
               <div className="mb-4">
                 <p className="text-sm text-teal-800 dark:text-teal-200 mb-3">{benchResult.message}</p>
-                <table className="w-full text-sm">
+                <div className="overflow-x-auto -mx-1 px-1"><table className="w-full text-sm min-w-[480px]">
                   <thead>
                     <tr className="text-left text-gray-500 dark:text-gray-400">
                       <th className="py-1">Test</th>
@@ -768,9 +768,10 @@ const Tunnels = () => {
                     ))}
                   </tbody>
                 </table>
+                </div>
               </div>
             )}
-            <div className="flex gap-3 justify-end">
+            <div className="flex flex-col-reverse sm:flex-row gap-2 sm:gap-3 justify-end">
               <button
                 type="button"
                 onClick={() => setShowBench(false)}
@@ -1022,8 +1023,8 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
   }
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100]">
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto">
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100] p-3 sm:p-4 overflow-y-auto">
+      <div className="bg-white dark:bg-gray-800 rounded-lg p-4 sm:p-6 w-full max-w-lg max-h-[90vh] overflow-y-auto my-auto">
         <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-1">Edit Tunnel</h2>
         <p className="text-sm text-gray-500 dark:text-gray-400 mb-4">
           Saving applies the new port, type, and core immediately. The previous process for this tunnel is replaced, not duplicated.
@@ -1044,7 +1045,7 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
               required
             />
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Core</label>
               <select
@@ -1328,7 +1329,7 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
           
           {core === 'frp' && (
             <>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                     Bind Port
@@ -1407,7 +1408,7 @@ const EditTunnelModal = ({ tunnel, onClose, onSuccess }: EditTunnelModalProps) =
             </div>
           )}
           
-          <div className="flex gap-3 justify-end">
+          <div className="flex flex-col-reverse sm:flex-row gap-2 sm:gap-3 justify-end">
             <button
               type="button"
               onClick={onClose}
@@ -1731,8 +1732,8 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
   }
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100] overflow-auto">
-      <div className="bg-white dark:bg-gray-800 rounded-lg p-4 w-full max-w-xl my-4 max-h-[90vh] overflow-y-auto">
+    <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-[100] overflow-y-auto p-3 sm:p-4">
+      <div className="bg-white dark:bg-gray-800 rounded-lg p-4 sm:p-6 w-full max-w-xl my-auto max-h-[90vh] overflow-y-auto">
         <h2 className="text-xl font-bold text-gray-900 dark:text-white mb-4">{t.tunnels.createTunnel}</h2>
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
@@ -1747,7 +1748,7 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
               required
             />
           </div>
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 {t.tunnels.iranNode}
@@ -1786,7 +1787,7 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                 {t.tunnels.core}
@@ -1856,7 +1857,7 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
           </div>
 
           {formData.core === 'gost' && (formData.type === 'tcp' || formData.type === 'udp' || formData.type === 'grpc' || formData.type === 'tcpmux') && (
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   {t.tunnels.remoteIP}
@@ -1931,7 +1932,7 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
                   Ports (comma-separated, same for panel and node local service)
                 </p>
               </div>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                   Rathole Port
@@ -2092,7 +2093,7 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
           
           {formData.core === 'frp' && (
             <>
-              <div className="grid grid-cols-2 gap-4">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                 <div>
                   <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">
                     Bind Port
@@ -2176,7 +2177,7 @@ const AddTunnelModal = ({ nodes, servers, onClose, onSuccess }: AddTunnelModalPr
               {formError}
             </div>
           )}
-          <div className="flex gap-3 justify-end">
+          <div className="flex flex-col-reverse sm:flex-row gap-2 sm:gap-3 justify-end">
             <button
               type="button"
               onClick={onClose}
@@ -2335,7 +2336,7 @@ function BackhaulAdvancedDrawer({
   return (
     <div className="fixed inset-0 z-[100] flex">
       <div className="flex-1 bg-black bg-opacity-40" onClick={onClose} />
-      <div className="w-full max-w-xl h-full bg-white dark:bg-gray-900 shadow-xl overflow-y-auto p-6">
+      <div className="w-full sm:max-w-xl h-full bg-white dark:bg-gray-900 shadow-xl overflow-y-auto p-4 sm:p-6">
         <div className="flex justify-between items-center mb-6">
           <h3 className="text-lg font-semibold text-gray-900 dark:text-white">Backhaul Advanced Settings</h3>
           <button
@@ -2351,7 +2352,7 @@ function BackhaulAdvancedDrawer({
             <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide mb-3">
               Server Options
             </h4>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Keepalive (s)</label>
                 <input
@@ -2490,7 +2491,7 @@ function BackhaulAdvancedDrawer({
             <h4 className="text-sm font-semibold text-gray-700 dark:text-gray-300 uppercase tracking-wide mb-3">
               Client Options
             </h4>
-            <div className="grid grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 dark:text-gray-300 mb-1">Connection Pool</label>
                 <input
